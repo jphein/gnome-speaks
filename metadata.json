@@ -2,7 +2,7 @@
     "uuid": "gnome-speaks@jphein",
     "name": "GNOME Speaks",
     "description": "Beautiful floating TTS/STT badge powered by Azure Speech Services",
-    "shell-version": ["46"],
+    "shell-version": ["46", "47", "48"],
     "version": 1,
     "settings-schema": "org.gnome.shell.extensions.gnome-speaks",
     "url": "https://github.com/jphein/gnome-speaks"

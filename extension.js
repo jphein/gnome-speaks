@@ -314,12 +314,14 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badge.add_child(this._icon);
         this._badge.add_child(this._label);
 
-        // Voice quality pill — small indicator overlaid on the badge
+        // Voice quality pill — always visible, compact in idle
         this._qualityPill = new St.Label({
-            text: 'HD',
+            text: '✦',
             style_class: 'gnome-speaks-quality-hd',
             reactive: true,
             track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_align: Clutter.ActorAlign.CENTER,
         });
         this._qualityPill.connect('button-release-event', (actor, event) => {
             if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
@@ -330,13 +332,15 @@ export default class GnomeSpeaksExtension extends Extension {
         this._qualityPill.connect('button-press-event', () => Clutter.EVENT_STOP);
         this._badge.add_child(this._qualityPill);
 
-        // Mode pill — indicates Dict or Chat mode
+        // Mode pill — always visible, compact in idle
         this._conversationMode = false;
         this._modePill = new St.Label({
-            text: 'Dict',
+            text: '✏️',
             style_class: 'gnome-speaks-mode-dict',
             reactive: true,
             track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_align: Clutter.ActorAlign.CENTER,
         });
         this._modePill.connect('button-release-event', (actor, event) => {
             if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
@@ -420,7 +424,12 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _toggleVoiceQuality() {
-        if (!this._proxy) return;
+        if (!this._proxy) {
+            // Local toggle for testing without service
+            this._voiceQuality = this._voiceQuality === 'hd' ? 'fast' : 'hd';
+            this._updateQualityPill();
+            return;
+        }
         this._proxy.ToggleVoiceQualityRemote((result, error) => {
             if (error) return;
             let quality = result[0];
@@ -435,7 +444,10 @@ export default class GnomeSpeaksExtension extends Extension {
     _updateQualityPill() {
         if (!this._qualityPill) return;
         let isHD = this._voiceQuality === 'hd';
-        this._qualityPill.text = isHD ? 'HD' : 'Fast';
+        let compact = this._state === States.IDLE;
+        this._qualityPill.text = isHD
+            ? (compact ? '✦' : '✦ HD')
+            : (compact ? '⚡' : '⚡ Fast');
         this._qualityPill.remove_style_class_name(
             isHD ? 'gnome-speaks-quality-fast' : 'gnome-speaks-quality-hd');
         this._qualityPill.add_style_class_name(
@@ -443,7 +455,12 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _toggleMode() {
-        if (!this._proxy) return;
+        if (!this._proxy) {
+            // Local toggle for testing without service
+            this._conversationMode = !this._conversationMode;
+            this._updateModePill();
+            return;
+        }
         this._proxy.ToggleConversationModeRemote((result, error) => {
             if (error) return;
             let enabled = result[0];
@@ -458,7 +475,10 @@ export default class GnomeSpeaksExtension extends Extension {
     _updateModePill() {
         if (!this._modePill) return;
         let isChat = this._conversationMode;
-        this._modePill.text = isChat ? 'Chat' : 'Dict';
+        let compact = this._state === States.IDLE;
+        this._modePill.text = isChat
+            ? (compact ? '🤖' : '🤖 AI')
+            : (compact ? '✏️' : '✏️ Type');
         this._modePill.remove_style_class_name(
             isChat ? 'gnome-speaks-mode-dict' : 'gnome-speaks-mode-chat');
         this._modePill.add_style_class_name(
@@ -847,6 +867,10 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._label.hide();
             }
         }
+
+        // Pills: compact (icon-only) in idle, full labels when expanded
+        this._updateQualityPill();
+        this._updateModePill();
 
         // Update panel icon and menu
         this._updatePanelIcon(newState);

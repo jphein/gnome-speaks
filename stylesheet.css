@@ -17,8 +17,7 @@
     padding: 8px 12px;
     min-height: 32px;
     background-color: rgba(30, 30, 30, 0.75);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4),
-                0 1px 3px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     transition: all 350ms ease-in-out;
     color: rgba(255, 255, 255, 0.95);
     font-weight: bold;
@@ -42,8 +41,7 @@
 
 .gnome-speaks-badge:hover {
     background-color: rgba(50, 50, 55, 0.82);
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5),
-                0 2px 6px rgba(0, 0, 0, 0.25);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
     border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
@@ -54,20 +52,14 @@
 
 .gnome-speaks-idle {
     background-color: rgba(40, 40, 46, 0.7);
-    min-width: 48px;
-    min-height: 48px;
-    padding: 0;
-    text-align: center;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3),
-                0 1px 2px rgba(0, 0, 0, 0.15);
+    padding: 6px 8px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .gnome-speaks-idle StIcon {
-    icon-size: 22px;
+    icon-size: 18px;
     color: rgba(255, 255, 255, 0.6);
-    margin: 0;
-    padding: 0;
 }
 
 .gnome-speaks-idle:hover {
@@ -87,9 +79,7 @@
 .gnome-speaks-listening {
     background-color: rgba(30, 110, 230, 0.88);
     padding: 8px 18px;
-    box-shadow: 0 0 20px rgba(30, 130, 255, 0.5),
-                0 4px 16px rgba(0, 0, 0, 0.3),
-                0 0 40px rgba(50, 140, 255, 0.15);
+    box-shadow: 0 0 20px rgba(30, 130, 255, 0.5);
     border: 1px solid rgba(120, 180, 255, 0.25);
 }
 
@@ -103,9 +93,7 @@
 
 .gnome-speaks-listening:hover {
     background-color: rgba(40, 120, 240, 0.92);
-    box-shadow: 0 0 28px rgba(30, 130, 255, 0.6),
-                0 6px 20px rgba(0, 0, 0, 0.35),
-                0 0 48px rgba(50, 140, 255, 0.2);
+    box-shadow: 0 0 28px rgba(30, 130, 255, 0.6);
 }
 
 /* ============================================================
@@ -116,9 +104,7 @@
 .gnome-speaks-processing {
     background-color: rgba(210, 160, 30, 0.88);
     padding: 8px 18px;
-    box-shadow: 0 0 16px rgba(230, 180, 40, 0.4),
-                0 4px 16px rgba(0, 0, 0, 0.3),
-                0 0 32px rgba(240, 190, 50, 0.12);
+    box-shadow: 0 0 16px rgba(230, 180, 40, 0.4);
     border: 1px solid rgba(255, 210, 80, 0.25);
 }
 
@@ -132,9 +118,7 @@
 
 .gnome-speaks-processing:hover {
     background-color: rgba(220, 170, 40, 0.92);
-    box-shadow: 0 0 22px rgba(230, 180, 40, 0.5),
-                0 6px 20px rgba(0, 0, 0, 0.35),
-                0 0 40px rgba(240, 190, 50, 0.18);
+    box-shadow: 0 0 22px rgba(230, 180, 40, 0.5);
 }
 
 /* ============================================================
@@ -145,9 +129,7 @@
 .gnome-speaks-speaking {
     background-color: rgba(140, 60, 220, 0.88);
     padding: 8px 18px;
-    box-shadow: 0 0 20px rgba(160, 80, 255, 0.5),
-                0 4px 16px rgba(0, 0, 0, 0.3),
-                0 0 40px rgba(170, 90, 255, 0.15);
+    box-shadow: 0 0 20px rgba(160, 80, 255, 0.5);
     border: 1px solid rgba(190, 130, 255, 0.25);
 }
 
@@ -161,9 +143,7 @@
 
 .gnome-speaks-speaking:hover {
     background-color: rgba(150, 70, 230, 0.92);
-    box-shadow: 0 0 28px rgba(160, 80, 255, 0.6),
-                0 6px 20px rgba(0, 0, 0, 0.35),
-                0 0 48px rgba(170, 90, 255, 0.2);
+    box-shadow: 0 0 28px rgba(160, 80, 255, 0.6);
 }
 
 /* ============================================================
@@ -173,9 +153,7 @@
 
 .gnome-speaks-error {
     background-color: rgba(220, 50, 50, 0.88);
-    box-shadow: 0 0 16px rgba(255, 60, 60, 0.4),
-                0 4px 16px rgba(0, 0, 0, 0.3),
-                0 0 32px rgba(255, 70, 70, 0.12);
+    box-shadow: 0 0 16px rgba(255, 60, 60, 0.4);
     border: 1px solid rgba(255, 120, 120, 0.25);
 }
 
@@ -189,110 +167,95 @@
 
 .gnome-speaks-error:hover {
     background-color: rgba(230, 60, 60, 0.92);
-    box-shadow: 0 0 22px rgba(255, 60, 60, 0.5),
-                0 6px 20px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 0 22px rgba(255, 60, 60, 0.5);
 }
 
 /* ============================================================
- * QUALITY PILL  (HD / Fast toggle on the badge)
+ * PILLS — shared base for quality + mode toggles
+ * Frosted-glass look that blends with the badge
  * ============================================================ */
 
+/* Base pill style — expanded (listening/speaking/processing) */
 .gnome-speaks-quality-hd,
-.gnome-speaks-quality-fast {
-    font-size: 10px;
-    font-weight: bold;
-    border-radius: 8px;
-    padding: 2px 6px;
-    margin-left: 4px;
-}
-
-.gnome-speaks-quality-hd {
-    background-color: rgba(218, 165, 32, 0.85);
-    color: rgba(255, 255, 255, 0.95);
-    border: 1px solid rgba(255, 200, 60, 0.4);
-}
-
-.gnome-speaks-quality-hd:hover {
-    background-color: rgba(228, 175, 42, 0.95);
-}
-
-.gnome-speaks-quality-fast {
-    background-color: rgba(46, 160, 67, 0.85);
-    color: rgba(255, 255, 255, 0.95);
-    border: 1px solid rgba(80, 200, 100, 0.4);
-}
-
-.gnome-speaks-quality-fast:hover {
-    background-color: rgba(56, 170, 77, 0.95);
-}
-
-/* Hide pill text when badge is idle (just show the icon) */
-.gnome-speaks-idle .gnome-speaks-quality-hd,
-.gnome-speaks-idle .gnome-speaks-quality-fast {
-    font-size: 9px;
-    padding: 1px 4px;
-    margin-left: 0;
-    margin-top: -14px;
-    margin-right: -6px;
-}
-
-/* ============================================================
- * MODE PILL  (Dict / Chat toggle on the badge)
- * ============================================================ */
-
+.gnome-speaks-quality-fast,
 .gnome-speaks-mode-dict,
 .gnome-speaks-mode-chat {
-    font-size: 10px;
-    font-weight: bold;
-    border-radius: 8px;
-    padding: 2px 6px;
-    margin-left: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 12px;
+    padding: 3px 10px;
+    margin-left: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background-color: rgba(255, 255, 255, 0.10);
+    color: rgba(255, 255, 255, 0.85);
+    text-align: center;
 }
 
-.gnome-speaks-mode-dict {
-    background-color: rgba(0, 150, 136, 0.85);
-    color: rgba(255, 255, 255, 0.95);
-    border: 1px solid rgba(0, 200, 180, 0.4);
-}
-
-.gnome-speaks-mode-dict:hover {
-    background-color: rgba(0, 170, 156, 0.95);
-}
-
-.gnome-speaks-mode-chat {
-    background-color: rgba(130, 60, 200, 0.85);
-    color: rgba(255, 255, 255, 0.95);
-    border: 1px solid rgba(170, 100, 255, 0.4);
-}
-
-.gnome-speaks-mode-chat:hover {
-    background-color: rgba(145, 75, 215, 0.95);
-}
-
-/* Shrink mode pill when badge is idle (compact circle) */
+/* Compact pill in idle — icon-only, smaller */
+.gnome-speaks-idle .gnome-speaks-quality-hd,
+.gnome-speaks-idle .gnome-speaks-quality-fast,
 .gnome-speaks-idle .gnome-speaks-mode-dict,
 .gnome-speaks-idle .gnome-speaks-mode-chat {
-    font-size: 9px;
-    padding: 1px 4px;
-    margin-left: 0;
-    margin-top: -14px;
-    margin-right: -6px;
+    font-size: 12px;
+    padding: 2px 5px;
+    margin-left: 3px;
+}
+
+/* ── Quality: HD (warm gold — premium feel) ── */
+.gnome-speaks-quality-hd {
+    background-color: rgba(255, 190, 40, 0.25);
+    color: rgba(255, 220, 120, 1.0);
+    border: 1px solid rgba(255, 200, 60, 0.35);
+    box-shadow: 0 0 8px rgba(255, 190, 40, 0.15);
+}
+.gnome-speaks-quality-hd:hover {
+    background-color: rgba(255, 190, 40, 0.38);
+}
+
+/* ── Quality: Fast (cool green — snappy feel) ── */
+.gnome-speaks-quality-fast {
+    background-color: rgba(60, 200, 100, 0.25);
+    color: rgba(100, 240, 150, 1.0);
+    border: 1px solid rgba(60, 200, 100, 0.35);
+    box-shadow: 0 0 8px rgba(60, 200, 100, 0.15);
+}
+.gnome-speaks-quality-fast:hover {
+    background-color: rgba(60, 200, 100, 0.38);
+}
+
+/* ── Mode: Type (muted — default, unobtrusive) ── */
+.gnome-speaks-mode-dict {
+    background-color: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.gnome-speaks-mode-dict:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.7);
+}
+
+/* ── Mode: AI Chat (vivid purple — clearly active) ── */
+.gnome-speaks-mode-chat {
+    background-color: rgba(160, 100, 255, 0.30);
+    color: rgba(200, 160, 255, 1.0);
+    border: 1px solid rgba(160, 100, 255, 0.40);
+    box-shadow: 0 0 8px rgba(160, 100, 255, 0.20);
+}
+.gnome-speaks-mode-chat:hover {
+    background-color: rgba(160, 100, 255, 0.42);
 }
 
 /* ============================================================
  * CHAT-MODE BADGE BORDER TINT
- * Subtle purple border glow when conversation mode is active
  * ============================================================ */
 
 .gnome-speaks-chat-active {
-    border: 1px solid rgba(160, 100, 255, 0.35);
+    border: 1px solid rgba(160, 100, 255, 0.30);
 }
 
 .gnome-speaks-idle.gnome-speaks-chat-active {
-    border: 1px solid rgba(160, 100, 255, 0.25);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3),
-                0 1px 2px rgba(0, 0, 0, 0.15),
-                0 0 12px rgba(140, 80, 230, 0.15);
+    border: 1px solid rgba(160, 100, 255, 0.20);
+    box-shadow: 0 0 10px rgba(140, 80, 230, 0.20);
 }
 
 /* ============================================================

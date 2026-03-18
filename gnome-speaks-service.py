@@ -422,6 +422,7 @@ class GnomeSpeaksService:
 
         # TTS state
         self._speak_thread = None
+        self._speak_lock = threading.Lock()
 
         # Inactivity timer
         self._inactivity_source_id = None
@@ -881,21 +882,22 @@ class GnomeSpeaksService:
         if not text or not text.strip():
             return False
 
-        if self.current_state not in ("idle",):
-            self.stop()
+        with self._speak_lock:
+            if self.current_state not in ("idle",):
+                self.stop()
 
-        if not CONFIG.get("key"):
-            GLib.idle_add(self._emit_error, "Azure Speech key not configured")
-            return False
+            if not CONFIG.get("key"):
+                GLib.idle_add(self._emit_error, "Azure Speech key not configured")
+                return False
 
-        self._set_state("speaking")
-        self._speak_thread = threading.Thread(
-            target=self._speak_worker,
-            args=(text.strip(),),
-            daemon=True,
-        )
-        self._speak_thread.start()
-        return True
+            self._set_state("speaking")
+            self._speak_thread = threading.Thread(
+                target=self._speak_worker,
+                args=(text.strip(),),
+                daemon=True,
+            )
+            self._speak_thread.start()
+            return True
 
     def _speak_worker(self, text):
         """Background thread: TTS using speech_tts.tts()."""
@@ -1252,16 +1254,34 @@ class DBusHandler:
 
             elif method_name == "Speak":
                 text = parameters.unpack()[0]
-                result = self.service.speak(text)
-                invocation.return_value(GLib.Variant("(b)", (result,)))
+                def _do_speak():
+                    result = self.service.speak(text)
+                    GLib.idle_add(
+                        lambda: invocation.return_value(
+                            GLib.Variant("(b)", (result,))
+                        ) or False
+                    )
+                threading.Thread(target=_do_speak, daemon=True).start()
 
             elif method_name == "SpeakClipboard":
-                result = self.service.speak_clipboard()
-                invocation.return_value(GLib.Variant("(b)", (result,)))
+                def _do_speak_clip():
+                    result = self.service.speak_clipboard()
+                    GLib.idle_add(
+                        lambda: invocation.return_value(
+                            GLib.Variant("(b)", (result,))
+                        ) or False
+                    )
+                threading.Thread(target=_do_speak_clip, daemon=True).start()
 
             elif method_name == "SpeakSelection":
-                result = self.service.speak_selection()
-                invocation.return_value(GLib.Variant("(b)", (result,)))
+                def _do_speak_sel():
+                    result = self.service.speak_selection()
+                    GLib.idle_add(
+                        lambda: invocation.return_value(
+                            GLib.Variant("(b)", (result,))
+                        ) or False
+                    )
+                threading.Thread(target=_do_speak_sel, daemon=True).start()
 
             elif method_name == "SetLanguage":
                 lang = parameters.unpack()[0]

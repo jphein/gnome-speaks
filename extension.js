@@ -222,19 +222,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._settings,
             Meta.KeyBindingFlags.NONE,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
-            () => {
-                if (!this._proxy) return;
-                this._proxy.ToggleVoiceQualityRemote((result, error) => {
-                    if (error) return;
-                    let quality = result[0];
-                    this._voiceQuality = quality;
-                    if (this._menuVoiceQualityItem)
-                        this._menuVoiceQualityItem.label.text = quality === 'hd'
-                            ? 'Voice: HD' : 'Voice: Fast';
-                    // Brief badge flash to confirm
-                    this._showTranscription(quality === 'hd' ? 'HD Voice' : 'Fast Voice');
-                });
-            }
+            () => this._toggleVoiceQuality()
         );
     }
 
@@ -326,6 +314,22 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badge.add_child(this._icon);
         this._badge.add_child(this._label);
 
+        // Voice quality pill — small indicator overlaid on the badge
+        this._qualityPill = new St.Label({
+            text: 'HD',
+            style_class: 'gnome-speaks-quality-hd',
+            reactive: true,
+            track_hover: true,
+        });
+        this._qualityPill.connect('button-release-event', (actor, event) => {
+            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+            this._toggleVoiceQuality();
+            return Clutter.EVENT_STOP;
+        });
+        // Prevent pill clicks from triggering badge drag/click
+        this._qualityPill.connect('button-press-event', () => Clutter.EVENT_STOP);
+        this._badge.add_child(this._qualityPill);
+
         this._badge.set_pivot_point(0.5, 0.5);
 
         let pressId = this._badge.connect('button-press-event', (actor, event) => {
@@ -398,6 +402,29 @@ export default class GnomeSpeaksExtension extends Extension {
         });
     }
 
+    _toggleVoiceQuality() {
+        if (!this._proxy) return;
+        this._proxy.ToggleVoiceQualityRemote((result, error) => {
+            if (error) return;
+            let quality = result[0];
+            this._voiceQuality = quality;
+            this._updateQualityPill();
+            if (this._menuVoiceQualityItem)
+                this._menuVoiceQualityItem.label.text = quality === 'hd'
+                    ? 'Voice: HD' : 'Voice: Fast';
+        });
+    }
+
+    _updateQualityPill() {
+        if (!this._qualityPill) return;
+        let isHD = this._voiceQuality === 'hd';
+        this._qualityPill.text = isHD ? 'HD' : 'Fast';
+        this._qualityPill.remove_style_class_name(
+            isHD ? 'gnome-speaks-quality-fast' : 'gnome-speaks-quality-hd');
+        this._qualityPill.add_style_class_name(
+            isHD ? 'gnome-speaks-quality-hd' : 'gnome-speaks-quality-fast');
+    }
+
     _destroyBadge() {
         for (let sig of this._signals) {
             try {
@@ -417,6 +444,7 @@ export default class GnomeSpeaksExtension extends Extension {
         }
         this._icon = null;
         this._label = null;
+        this._qualityPill = null;
     }
 
     _createPanelIndicator() {
@@ -489,16 +517,7 @@ export default class GnomeSpeaksExtension extends Extension {
         // ── Voice Quality toggle (HD ↔ Fast) ──
         this._voiceQuality = 'hd';
         this._menuVoiceQualityItem = new PopupMenu.PopupMenuItem('Voice: HD');
-        this._menuVoiceQualityItem.connect('activate', () => {
-            if (!this._proxy) return;
-            this._proxy.ToggleVoiceQualityRemote((result, error) => {
-                if (error) return;
-                let quality = result[0];
-                this._voiceQuality = quality;
-                this._menuVoiceQualityItem.label.text = quality === 'hd'
-                    ? 'Voice: HD' : 'Voice: Fast';
-            });
-        });
+        this._menuVoiceQualityItem.connect('activate', () => this._toggleVoiceQuality());
         menu.addMenuItem(this._menuVoiceQualityItem);
 
         // ── Language submenu ──
@@ -717,10 +736,11 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._setState(result[0]);
         });
 
-        // Sync voice quality label
+        // Sync voice quality pill + menu label
         this._proxy.GetVoiceQualityRemote((result, error) => {
             if (!error && result && result[0]) {
                 this._voiceQuality = result[0];
+                this._updateQualityPill();
                 if (this._menuVoiceQualityItem)
                     this._menuVoiceQualityItem.label.text = result[0] === 'hd'
                         ? 'Voice: HD' : 'Voice: Fast';

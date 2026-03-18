@@ -194,6 +194,49 @@
 }
 
 /* ============================================================
+ * QUALITY PILL  (HD / Fast toggle on the badge)
+ * ============================================================ */
+
+.gnome-speaks-quality-hd,
+.gnome-speaks-quality-fast {
+    font-size: 10px;
+    font-weight: bold;
+    border-radius: 8px;
+    padding: 2px 6px;
+    margin-left: 4px;
+}
+
+.gnome-speaks-quality-hd {
+    background-color: rgba(218, 165, 32, 0.85);
+    color: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(255, 200, 60, 0.4);
+}
+
+.gnome-speaks-quality-hd:hover {
+    background-color: rgba(228, 175, 42, 0.95);
+}
+
+.gnome-speaks-quality-fast {
+    background-color: rgba(46, 160, 67, 0.85);
+    color: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(80, 200, 100, 0.4);
+}
+
+.gnome-speaks-quality-fast:hover {
+    background-color: rgba(56, 170, 77, 0.95);
+}
+
+/* Hide pill text when badge is idle (just show the icon) */
+.gnome-speaks-idle .gnome-speaks-quality-hd,
+.gnome-speaks-idle .gnome-speaks-quality-fast {
+    font-size: 9px;
+    padding: 1px 4px;
+    margin-left: 0;
+    margin-top: -14px;
+    margin-right: -6px;
+}
+
+/* ============================================================
  * PANEL INDICATOR
  * ============================================================ */
 

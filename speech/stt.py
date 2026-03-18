@@ -42,11 +42,15 @@ def _make_ws_audio_msg(request_id, audio_data):
 
 
 def _get_stt_ws():
-    """Get or create persistent WebSocket to Azure STT (saves ~230ms on reuse)."""
+    """Get or create persistent WebSocket to Azure STT (saves ~230ms on reuse).
+
+    Returns (ws, is_fresh) where is_fresh=True if a new connection was just created.
+    Callers should pass drain=not is_fresh to _init_stt_ws_session().
+    """
     now = time.time()
     if state._persistent_ws is not None and (now - state._persistent_ws_time) < state.WS_IDLE_TIMEOUT:
         state._persistent_ws_time = now
-        return state._persistent_ws
+        return state._persistent_ws, False
     if state._persistent_ws is not None:
         try:
             state._persistent_ws.close()
@@ -66,7 +70,7 @@ def _get_stt_ws():
         timeout=10,
     )
     state._persistent_ws_time = time.time()
-    return state._persistent_ws
+    return state._persistent_ws, True
 
 
 def _invalidate_stt_ws():
@@ -134,30 +138,39 @@ def _window_partial(text, term_width=None):
     return text if len(text) < window else "..." + text[-(window - 3):]
 
 
-def _init_stt_ws_session(ws, request_id):
-    """Initialize an STT WebSocket session: drain stale msgs, send config + WAV header."""
-    try:
-        ws.settimeout(0.05)
-        while True:
-            ws.recv()
-    except Exception:
-        pass
-    speech_config = {
-        "context": {
-            "system": {"version": "1.0.00000"},
-            "os": {"platform": "Linux", "name": "speech-to-cli"},
-            "audio": {"source": {"connectivity": "Unknown", "manufacturer": "Unknown",
-                                 "model": "Unknown", "type": "Unknown"}},
-        }
+# Pre-computed WAV header for STT init (never changes)
+_STT_WAV_HEADER = struct.pack('<4sI4s4sIHHIIHH4sI',
+    b'RIFF', 0, b'WAVE', b'fmt ', 16, 1, 1, 16000, 32000, 2, 16, b'data', 0)
+
+# Pre-serialized speech config JSON (never changes)
+_STT_SPEECH_CONFIG = json.dumps({
+    "context": {
+        "system": {"version": "1.0.00000"},
+        "os": {"platform": "Linux", "name": "speech-to-cli"},
+        "audio": {"source": {"connectivity": "Unknown", "manufacturer": "Unknown",
+                             "model": "Unknown", "type": "Unknown"}},
     }
+})
+
+
+def _init_stt_ws_session(ws, request_id, drain=True):
+    """Initialize an STT WebSocket session: drain stale msgs, send config + WAV header.
+
+    Set drain=False on freshly created connections (no stale messages to clear).
+    """
+    if drain:
+        try:
+            ws.settimeout(0.05)
+            while True:
+                ws.recv()
+        except Exception:
+            pass
     ws.send(
         f"Path: speech.config\r\nX-RequestId: {request_id}\r\n"
         f"X-Timestamp: {_get_iso_timestamp()}\r\n"
-        f"Content-Type: application/json\r\n\r\n" + json.dumps(speech_config)
+        f"Content-Type: application/json\r\n\r\n" + _STT_SPEECH_CONFIG
     )
-    wav_header = struct.pack('<4sI4s4sIHHIIHH4sI',
-        b'RIFF', 0, b'WAVE', b'fmt ', 16, 1, 1, 16000, 32000, 2, 16, b'data', 0)
-    ws.send(_make_ws_audio_msg(request_id, wav_header), opcode=websocket.ABNF.OPCODE_BINARY)
+    ws.send(_make_ws_audio_msg(request_id, _STT_WAV_HEADER), opcode=websocket.ABNF.OPCODE_BINARY)
 
 
 def _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log):
@@ -261,7 +274,7 @@ def stt_streaming(max_seconds=30, progress_token=None):
     _log = _make_logger("stt-stream")
     _end_word = CONFIG.get("end_word", "over")
 
-    def _do_streaming(ws, max_seconds):
+    def _do_streaming(ws, max_seconds, is_fresh=False):
         request_id = uuid.uuid4().hex
 
         proc = _take_prewarmed_rec()
@@ -271,7 +284,7 @@ def stt_streaming(max_seconds=30, progress_token=None):
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
 
-        _init_stt_ws_session(ws, request_id)
+        _init_stt_ws_session(ws, request_id, drain=not is_fresh)
         play_chime()
         send_progress(progress_token, 0, 100, "🎤 Listening...")
         register_proc(proc)
@@ -439,8 +452,8 @@ def stt_streaming(max_seconds=30, progress_token=None):
     # Try persistent connection, retry once on failure
     for attempt in range(2):
         try:
-            ws = _get_stt_ws()
-            text = _do_streaming(ws, max_seconds)
+            ws, is_fresh = _get_stt_ws()
+            text = _do_streaming(ws, max_seconds, is_fresh)
             if is_cancelled():
                 return {"text": "", "cancelled": True}
             return {"text": text}

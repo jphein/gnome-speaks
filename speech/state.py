@@ -70,7 +70,7 @@ MIN_SPEECH_DURATION = 0.15
 VAD_AGGRESSIVENESS = 3
 ENERGY_CALIBRATION_FRAMES = 5
 ENERGY_THRESHOLD_MULTIPLIER = 2.5
-NOISE_CACHE_TTL = 30.0
+NOISE_CACHE_TTL = 120.0  # reuse ambient threshold for 2min (re-calibrates on fresh listen)
 
 WS_IDLE_TIMEOUT = 540  # Azure closes at ~600s
 

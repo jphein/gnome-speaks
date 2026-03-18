@@ -16,6 +16,12 @@ import state
 from state import (CONFIG, _cancel_event, _pause_event,
                    is_cancelled, register_proc, unregister_proc, get_http_session)
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 # Pre-computed struct format for standard frame size (480 samples = 960 bytes)
 _RMS_FMT = f'<{state.FRAME_BYTES // 2}h'
 
@@ -414,7 +420,11 @@ def rms_energy(frame_bytes):
     n = len(frame_bytes) // 2
     if n == 0:
         return 0.0
-    # Fast path: use cached format for standard frame size
+    # Fast path: numpy vectorized RMS (~5-10x faster, SIMD-optimized)
+    if _HAS_NUMPY and len(frame_bytes) == state.FRAME_BYTES:
+        samples = np.frombuffer(frame_bytes, dtype=np.int16)
+        return float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+    # Fallback: struct.unpack + Python generator
     if len(frame_bytes) == state.FRAME_BYTES:
         samples = struct.unpack(_RMS_FMT, frame_bytes)
     else:

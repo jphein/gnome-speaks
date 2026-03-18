@@ -23,6 +23,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -186,40 +187,46 @@ def clipboard_write(text):
     return False
 
 
+_TYPING_TOOL = None
+
+
+def _detect_typing_tool():
+    """Detect the best available typing tool at startup (avoids repeated PATH lookups)."""
+    global _TYPING_TOOL
+    if shutil.which("ydotool"):
+        _TYPING_TOOL = "ydotool"
+    elif shutil.which("xdotool"):
+        _TYPING_TOOL = "xdotool"
+    else:
+        _TYPING_TOOL = "clipboard"
+    log.info("Typing tool: %s", _TYPING_TOOL)
+
+
 def type_at_cursor(text):
-    """Type text at the current cursor position using wtype (Wayland) or xdotool (X11)."""
+    """Type text at the current cursor position using the pre-detected tool."""
     if not text:
         return False
 
     # Brief delay to let focus settle after badge interaction
     time.sleep(0.05)
 
-    # Try wtype first (Wayland-native)
-    if os.environ.get("WAYLAND_DISPLAY"):
-        try:
-            subprocess.Popen(
-                ["wtype", "--", text],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except FileNotFoundError:
-            pass
+    if _TYPING_TOOL == "ydotool":
+        subprocess.Popen(
+            ["ydotool", "type", "--", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
 
-    # Try xdotool (X11)
-    if os.environ.get("DISPLAY"):
-        try:
-            subprocess.Popen(
-                ["xdotool", "type", "--clearmodifiers", "--", text],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except FileNotFoundError:
-            pass
+    if _TYPING_TOOL == "xdotool" and os.environ.get("DISPLAY"):
+        subprocess.Popen(
+            ["xdotool", "type", "--clearmodifiers", "--", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
 
-    # Final fallback: copy to clipboard
-    log.warning("No typing tool available, copying to clipboard instead")
+    log.warning("No typing tool available (install ydotool), copying to clipboard instead")
     return clipboard_write(text)
 
 
@@ -445,9 +452,10 @@ class GnomeSpeaksService:
 
         # 2. Get persistent WebSocket (with retry)
         ws = None
+        ws_fresh = False
         for attempt in range(2):
             try:
-                ws = _get_stt_ws()
+                ws, ws_fresh = _get_stt_ws()
                 break
             except Exception as exc:
                 _log(f"WS connect attempt {attempt + 1} failed: {exc}")
@@ -463,7 +471,7 @@ class GnomeSpeaksService:
 
         request_id = uuid.uuid4().hex
         try:
-            _init_stt_ws_session(ws, request_id)
+            _init_stt_ws_session(ws, request_id, drain=not ws_fresh)
         except Exception as exc:
             _log(f"WS session init failed: {exc}")
             _invalidate_stt_ws()
@@ -1169,6 +1177,8 @@ def main():
         "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s)",
         _speech_src, CONFIG.get("region"), HAS_VAD, HAS_WS,
     )
+
+    _detect_typing_tool()
 
     # Prewarm recorder, WebSocket, and HTTP session so first call is instant
     _prewarm_recorder()

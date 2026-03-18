@@ -318,22 +318,32 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             icon_name: 'audio-card-symbolic',
         });
 
+        // Enumerate PipeWire sinks and sources for device menus
+        const sinks = this._enumeratePipeWireDevices('sinks');
+        const sources = this._enumeratePipeWireDevices('sources');
+
         // ── Playback ──
         const playGroup = new Adw.PreferencesGroup({
             title: 'Playback',
         });
         page.add(playGroup);
 
-        this._addComboRow(playGroup, 'Player', 'player', [
-            ['auto', 'Auto-detect'],
+        const playerOptions = [['auto', 'Auto-detect']];
+        for (const [cmd, label] of [
             ['aplay', 'aplay (ALSA)'],
             ['pw-play', 'pw-play (PipeWire)'],
             ['pw-cat', 'pw-cat (PipeWire)'],
             ['ffplay', 'ffplay (FFmpeg)'],
-        ], 'auto');
+        ]) {
+            if (this._commandExists(cmd))
+                playerOptions.push([cmd, label]);
+            else
+                playerOptions.push([cmd, `${label} — not found`]);
+        }
+        this._addComboRow(playGroup, 'Player', 'player', playerOptions, 'auto');
 
-        this._addEntryRow(playGroup, 'Speaker Sink', 'speaker_sink', '',
-            'PipeWire node name or ID for output. Leave empty for default.');
+        this._addComboRow(playGroup, 'Speaker', 'speaker_sink',
+            [['', 'System Default'], ...sinks], '');
 
         // ── Recording ──
         const recGroup = new Adw.PreferencesGroup({
@@ -341,14 +351,20 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(recGroup);
 
-        this._addComboRow(recGroup, 'Recorder', 'recorder', [
-            ['auto', 'Auto-detect'],
+        const recorderOptions = [['auto', 'Auto-detect']];
+        for (const [cmd, label] of [
             ['pw-record', 'pw-record (PipeWire)'],
             ['arecord', 'arecord (ALSA)'],
-        ], 'auto');
+        ]) {
+            if (this._commandExists(cmd))
+                recorderOptions.push([cmd, label]);
+            else
+                recorderOptions.push([cmd, `${label} — not found`]);
+        }
+        this._addComboRow(recGroup, 'Recorder', 'recorder', recorderOptions, 'auto');
 
-        this._addEntryRow(recGroup, 'Mic Source', 'mic_source', '',
-            'PipeWire node name or ID for microphone input. Leave empty for default.');
+        this._addComboRow(recGroup, 'Microphone', 'mic_source',
+            [['', 'System Default'], ...sources], '');
 
         // ── Duplex ──
         const duplexGroup = new Adw.PreferencesGroup({
@@ -364,6 +380,68 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         ], 'auto');
 
         window.add(page);
+    }
+
+    /**
+     * Enumerate PipeWire sinks or sources by parsing `wpctl status`.
+     * Returns [[nodeId, label], ...] suitable for _addComboRow.
+     */
+    _enumeratePipeWireDevices(type) {
+        const devices = [];
+        try {
+            const [ok, stdout, stderr, exitCode] = GLib.spawn_command_line_sync('wpctl status');
+            if (!ok || exitCode !== 0) return devices;
+
+            const output = new TextDecoder('utf-8').decode(stdout);
+            const lines = output.split('\n');
+
+            // Find the section header: "Sinks:" or "Sources:"
+            const header = type === 'sinks' ? 'Sinks:' : 'Sources:';
+            let inSection = false;
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+
+                if (trimmed.endsWith(header)) {
+                    inSection = true;
+                    continue;
+                }
+
+                // Stop at next section (empty line with │ only, or next header)
+                if (inSection && (trimmed === '│' || trimmed === '' ||
+                    (trimmed.endsWith(':') && !trimmed.match(/^\d/)))) {
+                    break;
+                }
+
+                if (!inSection) continue;
+
+                // Parse lines like: " │  *   54. USB Audio Device Analog Stereo      [vol: 0.19]"
+                // or:               " │      33. Built-in Audio Analog Stereo        [vol: 0.65]"
+                const match = trimmed.match(/(\*?)\s*(\d+)\.\s+(.+?)\s+\[/);
+                if (match) {
+                    const isDefault = match[1] === '*';
+                    const nodeId = match[2];
+                    const name = match[3].trim();
+                    const label = isDefault ? `${name} (default)` : name;
+                    devices.push([nodeId, label]);
+                }
+            }
+        } catch (e) {
+            // wpctl not available — return empty list
+        }
+        return devices;
+    }
+
+    /**
+     * Check if a command exists on the system (uses `which`).
+     */
+    _commandExists(cmd) {
+        try {
+            const [ok, stdout, stderr, exitCode] = GLib.spawn_command_line_sync(`which ${cmd}`);
+            return ok && exitCode === 0;
+        } catch (e) {
+            return false;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -680,8 +758,13 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
 
         row.connect('notify::selected', () => {
             const idx = row.get_selected();
-            if (idx >= 0 && idx < values.length)
-                this._setConfigValue(configKey, values[idx]);
+            if (idx >= 0 && idx < values.length) {
+                const val = values[idx];
+                if (val === '' || val === null)
+                    this._deleteConfigKey(configKey);
+                else
+                    this._setConfigValue(configKey, val);
+            }
         });
 
         group.add(row);

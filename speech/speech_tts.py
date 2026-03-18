@@ -565,10 +565,10 @@ def talk_fullduplex(text, quality="fast", speed=1.0, voice=None, pitch="default"
     use_streaming_stt = HAS_WS
     if use_streaming_stt:
         try:
-            ws = _get_stt_ws()
+            ws, ws_fresh = _get_stt_ws()
             rid = uuid.uuid4().hex
             stt_request_id[0] = rid
-            _init_stt_ws_session(ws, rid)
+            _init_stt_ws_session(ws, rid, drain=not ws_fresh)
             stt_ws[0] = ws
         except Exception:
             use_streaming_stt = False
@@ -710,10 +710,10 @@ def talk_fullduplex(text, quality="fast", speed=1.0, voice=None, pitch="default"
                     ws_reconnected = True
                     _log(f"WS dead at post-TTS frame {post_tts_frames}, starting fresh STT session")
                     try:
-                        ws_new = _get_stt_ws()
+                        ws_new, ws_new_fresh = _get_stt_ws()
                         rid_new = uuid.uuid4().hex
                         stt_request_id[0] = rid_new
-                        _init_stt_ws_session(ws_new, rid_new)
+                        _init_stt_ws_session(ws_new, rid_new, drain=not ws_new_fresh)
                         # Replay buffered frames: TTS-phase dead frames + post-TTS frames
                         replay = tts_dead_frames + rec_frames
                         for prev_frame in replay:

@@ -6,7 +6,7 @@ Bus name:    org.gnome.Speaks
 Object path: /org/gnome/Speaks
 Interface:   org.gnome.Speaks
 
-Imports speech-to-cli modules directly to reuse all optimizations:
+Uses vendored speech modules (speech/) for all audio optimizations:
 prewarmed recorder, persistent WebSocket, noise calibration caching,
 HTTP session pooling, VAD, energy-gated silence detection.
 """
@@ -14,6 +14,7 @@ HTTP session pooling, VAD, energy-gated silence detection.
 import argparse
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -27,20 +28,15 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib
 
 # ---------------------------------------------------------------------------
-# Locate and import speech-to-cli modules
+# Import speech modules: prefer live speech-to-cli (dev), fall back to vendored speech/
 # ---------------------------------------------------------------------------
 
-SPEECH_CLI_PATH = os.path.expanduser("~/Projects/speech-to-cli")
-if not os.path.isdir(SPEECH_CLI_PATH):
-    # Check sibling directory
-    SPEECH_CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "speech-to-cli")
-    SPEECH_CLI_PATH = os.path.normpath(SPEECH_CLI_PATH)
-
-if not os.path.isdir(SPEECH_CLI_PATH):
-    print(f"FATAL: speech-to-cli not found at {SPEECH_CLI_PATH}", file=sys.stderr)
-    sys.exit(1)
-
-sys.path.insert(0, SPEECH_CLI_PATH)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_LIVE_PATH = os.path.expanduser("~/Projects/speech-to-cli")
+if os.path.isdir(_LIVE_PATH):
+    sys.path.insert(0, _LIVE_PATH)
+else:
+    sys.path.insert(0, os.path.join(_SCRIPT_DIR, "speech"))
 
 import state  # noqa: E402
 from state import CONFIG, HAS_VAD, HAS_WS, FRAME_BYTES, FRAME_MS, SAMPLE_RATE  # noqa: E402
@@ -105,6 +101,22 @@ INTROSPECTION_XML = """
     <method name="SpeakClipboard">
       <arg direction="out" type="b" name="success"/>
     </method>
+    <method name="SpeakSelection">
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="SetLanguage">
+      <arg direction="in" type="s" name="language"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="GetLanguage">
+      <arg direction="out" type="s" name="language"/>
+    </method>
+    <method name="ToggleConversationMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="ToggleContinuousDictation">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
     </method>
@@ -119,6 +131,9 @@ INTROSPECTION_XML = """
     </signal>
     <signal name="PartialTranscription">
       <arg type="s" name="text"/>
+    </signal>
+    <signal name="AudioLevel">
+      <arg type="d" name="level"/>
     </signal>
     <signal name="Error">
       <arg type="s" name="message"/>
@@ -200,6 +215,61 @@ def type_at_cursor(text):
     return clipboard_write(text)
 
 
+def selection_read():
+    """Read the currently highlighted/selected text (PRIMARY selection)."""
+    for cmd in [["wl-paste", "--primary", "--no-newline"], ["xclip", "-selection", "primary", "-o"]]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return result.stdout
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            pass
+    return ""
+
+
+# Voice commands: spoken punctuation → actual characters
+_VOICE_COMMANDS = [
+    (re.compile(r'\b(?:period|full stop)\b', re.I), '.'),
+    (re.compile(r'\bcomma\b', re.I), ','),
+    (re.compile(r'\bquestion mark\b', re.I), '?'),
+    (re.compile(r'\bexclamation (?:mark|point)\b', re.I), '!'),
+    (re.compile(r'\bcolon\b', re.I), ':'),
+    (re.compile(r'\bsemicolon\b', re.I), ';'),
+    (re.compile(r'\bnew line\b', re.I), '\n'),
+    (re.compile(r'\bnew paragraph\b', re.I), '\n\n'),
+    (re.compile(r'\bopen quote\b', re.I), '"'),
+    (re.compile(r'\bclose quote\b', re.I), '"'),
+    (re.compile(r'\bhyphen\b', re.I), '-'),
+    (re.compile(r'\bdash\b', re.I), ' \u2014 '),
+    (re.compile(r'\bellipsis\b', re.I), '...'),
+    (re.compile(r'\btab key\b', re.I), '\t'),
+]
+
+
+def apply_voice_commands(text):
+    """Replace spoken punctuation commands with actual characters."""
+    if not CONFIG.get("voice_commands", True):
+        return text
+    result = text
+    for pattern, replacement in _VOICE_COMMANDS:
+        result = pattern.sub(replacement, result)
+    # Clean up whitespace before punctuation
+    result = re.sub(r'\s+([.,?!:;])', r'\1', result)
+    return result
+
+
+def apply_auto_corrections(text):
+    """Apply user-defined word corrections from config."""
+    corrections = CONFIG.get("auto_corrections", {})
+    if not corrections:
+        return text
+    for wrong, right in corrections.items():
+        text = re.sub(r'\b' + re.escape(wrong) + r'\b', right, text, flags=re.IGNORECASE)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Service implementation
 # ---------------------------------------------------------------------------
@@ -269,6 +339,15 @@ class GnomeSpeaksService:
                 None, OBJECT_PATH, INTERFACE_NAME,
                 "PartialTranscription",
                 GLib.Variant("(s)", (text,)),
+            )
+        return False
+
+    def _emit_audio_level(self, level):
+        if self._connection is not None:
+            self._connection.emit_signal(
+                None, OBJECT_PATH, INTERFACE_NAME,
+                "AudioLevel",
+                GLib.Variant("(d)", (level,)),
             )
         return False
 
@@ -430,6 +509,11 @@ class GnomeSpeaksService:
 
                     total_frames += 1
 
+                    # Emit audio level for badge visualization
+                    level = rms_energy(chunk) / 10000.0
+                    if total_frames % 3 == 0:  # Throttle to every 3rd frame
+                        GLib.idle_add(self._emit_audio_level, min(level, 1.0))
+
                     if is_speech_energy(chunk, vad, energy_threshold):
                         speech_frames += 1
                         silence_frames = 0
@@ -547,11 +631,22 @@ class GnomeSpeaksService:
         user_text = _strip_end_word(user_text, end_word)
         _log(f"FINAL: {repr(user_text[:100])}")
 
-        # 7. Emit results and type/copy
+        # 7. Post-process: voice commands and auto-corrections
+        if user_text:
+            user_text = apply_voice_commands(user_text)
+            user_text = apply_auto_corrections(user_text)
+
+        # 8. Emit results and type/copy
         self._set_state("processing")
         if user_text:
             GLib.idle_add(self._emit_transcription_ready, user_text)
             log.info("Transcription: %s", user_text[:100])
+
+            # Conversation mode: send to LLM then speak response
+            if CONFIG.get("conversation_mode", False):
+                self._conversation_worker(user_text)
+                _schedule_warmup()
+                return
 
             # Type at cursor (dictation mode) or just copy to clipboard
             if CONFIG.get("dictation_mode", True):
@@ -564,8 +659,12 @@ class GnomeSpeaksService:
 
         self._set_state("idle")
 
-        # 8. Prewarm for next use
+        # 9. Prewarm for next use
         _schedule_warmup()
+
+        # 10. Continuous dictation: auto-restart listening
+        if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
+            GLib.idle_add(lambda: self.start_listening() or False)
 
     def stop_listening(self):
         """Stop recording but keep accumulated text. Returns transcription."""
@@ -635,6 +734,107 @@ class GnomeSpeaksService:
             GLib.idle_add(self._emit_error, "Clipboard is empty")
             return False
         return self.speak(text)
+
+    def speak_selection(self):
+        """Read the currently selected/highlighted text and speak it."""
+        text = selection_read()
+        if not text or not text.strip():
+            GLib.idle_add(self._emit_error, "No text selected")
+            return False
+        return self.speak(text)
+
+    def set_language(self, language):
+        """Change the STT language at runtime."""
+        CONFIG["language"] = language
+        log.info("Language set to: %s", language)
+        _invalidate_stt_ws()
+        return True
+
+    def get_language(self):
+        return CONFIG.get("language", "en-US")
+
+    def toggle_conversation_mode(self):
+        current = CONFIG.get("conversation_mode", False)
+        CONFIG["conversation_mode"] = not current
+        log.info("Conversation mode: %s", not current)
+        return not current
+
+    def toggle_continuous_dictation(self):
+        current = CONFIG.get("continuous_dictation", False)
+        CONFIG["continuous_dictation"] = not current
+        log.info("Continuous dictation: %s", not current)
+        return not current
+
+    # -- Conversation mode (voice -> LLM -> TTS) --------------------------
+
+    def _conversation_worker(self, user_text):
+        """Send transcribed text to an LLM and speak the response."""
+        try:
+            import requests as http_requests
+
+            api_key = CONFIG.get("llm_api_key", "")
+            provider = CONFIG.get("llm_provider", "anthropic")
+            model = CONFIG.get("llm_model", "claude-sonnet-4-20250514")
+            system_prompt = CONFIG.get(
+                "llm_system_prompt",
+                "You are a helpful voice assistant. Keep responses concise and conversational.",
+            )
+
+            if not api_key:
+                GLib.idle_add(self._emit_error, "No LLM API key configured")
+                self._set_state("idle")
+                return
+
+            if provider == "anthropic":
+                resp = http_requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 1024,
+                        "system": system_prompt,
+                        "messages": [{"role": "user", "content": user_text}],
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                reply = resp.json()["content"][0]["text"]
+            elif provider == "openai":
+                resp = http_requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_text},
+                        ],
+                        "max_tokens": 1024,
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                reply = resp.json()["choices"][0]["message"]["content"]
+            else:
+                GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
+                self._set_state("idle")
+                return
+
+            if reply:
+                self.speak(reply)
+            else:
+                self._set_state("idle")
+        except Exception as exc:
+            log.exception("Conversation failed: %s", exc)
+            GLib.idle_add(self._emit_error, f"LLM error: {exc}")
+            self._set_state("idle")
 
     # -- Stop --------------------------------------------------------------
 
@@ -706,6 +906,27 @@ class DBusHandler:
 
             elif method_name == "SpeakClipboard":
                 result = self.service.speak_clipboard()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "SpeakSelection":
+                result = self.service.speak_selection()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "SetLanguage":
+                lang = parameters.unpack()[0]
+                result = self.service.set_language(lang)
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetLanguage":
+                result = self.service.get_language()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "ToggleConversationMode":
+                result = self.service.toggle_conversation_mode()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "ToggleContinuousDictation":
+                result = self.service.toggle_continuous_dictation()
                 invocation.return_value(GLib.Variant("(b)", (result,)))
 
             elif method_name == "Stop":
@@ -791,8 +1012,8 @@ def main():
         # Continue anyway — we will emit Error signals on method calls
 
     log.info(
-        "Starting GNOME Speaks service (speech-to-cli=%s, region=%s, vad=%s, ws=%s)",
-        SPEECH_CLI_PATH, CONFIG.get("region"), HAS_VAD, HAS_WS,
+        "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s)",
+        os.path.join(_SCRIPT_DIR, "speech"), CONFIG.get("region"), HAS_VAD, HAS_WS,
     )
 
     # Prewarm recorder, WebSocket, and HTTP session so first call is instant

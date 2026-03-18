@@ -48,6 +48,26 @@
       </description>
     </key>
 
+    <!-- Keyboard shortcuts -->
+
+    <key name="toggle-listening-shortcut" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;space']</default>
+      <summary>Toggle listening shortcut</summary>
+      <description>Keyboard shortcut to start/stop listening.</description>
+    </key>
+
+    <key name="speak-clipboard-shortcut" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;c']</default>
+      <summary>Speak clipboard shortcut</summary>
+      <description>Keyboard shortcut to speak clipboard contents aloud.</description>
+    </key>
+
+    <key name="read-selection-shortcut" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;r']</default>
+      <summary>Read selection shortcut</summary>
+      <description>Keyboard shortcut to read selected text aloud.</description>
+    </key>
+
   </schema>
 
 </schemalist>

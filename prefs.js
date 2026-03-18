@@ -209,6 +209,14 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'Type transcribed text where the cursor is',
             'dictation_mode', true);
 
+        this._addSwitchRow(dictGroup, 'Continuous Dictation',
+            'Automatically restart listening after each utterance',
+            'continuous_dictation', false);
+
+        this._addSwitchRow(dictGroup, 'Voice Commands',
+            'Convert spoken punctuation (period, comma, etc.) to characters',
+            'voice_commands', true);
+
         // ── Timing ──
         const timingGroup = new Adw.PreferencesGroup({
             title: 'Timing',
@@ -426,6 +434,17 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'Display GNOME Speaks in the top panel',
             'show-panel-indicator');
 
+        // ── Keyboard Shortcuts ──
+        const shortcutGroup = new Adw.PreferencesGroup({
+            title: 'Keyboard Shortcuts',
+            description: 'Global shortcuts. Change via GNOME Settings > Keyboard > Custom Shortcuts, or edit dconf directly.',
+        });
+        page.add(shortcutGroup);
+
+        this._addShortcutRow(shortcutGroup, 'Toggle Listening', 'toggle-listening-shortcut');
+        this._addShortcutRow(shortcutGroup, 'Speak Clipboard', 'speak-clipboard-shortcut');
+        this._addShortcutRow(shortcutGroup, 'Read Selection', 'read-selection-shortcut');
+
         // ── Behavior ──
         const behaviorGroup = new Adw.PreferencesGroup({
             title: 'Behavior',
@@ -480,6 +499,52 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addSwitchRow(bargeGroup, 'Barge-in Chime',
             'Play chime when barge-in is detected',
             'chime_barge_in', true);
+
+        // ── Conversation Mode ──
+        const convGroup = new Adw.PreferencesGroup({
+            title: 'Conversation Mode',
+            description: 'Voice chat: your speech is sent to an LLM, and the response is spoken back.',
+        });
+        page.add(convGroup);
+
+        this._addSwitchRow(convGroup, 'Enable Conversation Mode',
+            'Send transcriptions to LLM and speak the response',
+            'conversation_mode', false);
+
+        this._addComboRow(convGroup, 'LLM Provider', 'llm_provider', [
+            ['anthropic', 'Anthropic (Claude)'],
+            ['openai', 'OpenAI (GPT)'],
+        ], 'anthropic');
+
+        this._addPasswordRow(convGroup, 'LLM API Key', 'llm_api_key',
+            'API key for the selected LLM provider');
+
+        this._addEntryRow(convGroup, 'LLM Model', 'llm_model', 'claude-sonnet-4-20250514',
+            'Model to use for conversation');
+
+        this._addEntryRow(convGroup, 'System Prompt', 'llm_system_prompt',
+            'You are a helpful voice assistant. Keep responses concise and conversational.',
+            'Instructions for the LLM persona');
+
+        // ── Notification Reader ──
+        const notifGroup = new Adw.PreferencesGroup({
+            title: 'Notification Reader',
+            description: 'Automatically read GNOME notifications aloud.',
+        });
+        page.add(notifGroup);
+
+        this._addSwitchRow(notifGroup, 'Read Notifications',
+            'Speak notification titles and body text as they arrive',
+            'read_notifications', false);
+
+        // ── Auto-Corrections ──
+        const correctGroup = new Adw.PreferencesGroup({
+            title: 'Auto-Corrections',
+            description: 'Custom word replacements applied to transcriptions. Format: wrong=right, one per line.',
+        });
+        page.add(correctGroup);
+
+        this._addCorrectionsRow(correctGroup);
 
         // ── Other ──
         const otherGroup = new Adw.PreferencesGroup({
@@ -696,6 +761,140 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
 
         group.add(row);
         return row;
+    }
+
+    _addCorrectionsRow(group) {
+        const corrections = this._config['auto_corrections'] || {};
+        const text = Object.entries(corrections)
+            .map(([wrong, right]) => `${wrong}=${right}`)
+            .join('\n');
+
+        const row = new Adw.ActionRow({
+            title: 'Edit Corrections',
+            subtitle: `${Object.keys(corrections).length} corrections defined`,
+        });
+
+        const editButton = new Gtk.Button({
+            label: 'Edit',
+            valign: Gtk.Align.CENTER,
+        });
+
+        editButton.connect('clicked', () => {
+            const dialog = new Gtk.Dialog({
+                title: 'Auto-Corrections',
+                modal: true,
+                default_width: 400,
+                default_height: 300,
+            });
+
+            const textView = new Gtk.TextView({
+                editable: true,
+                wrap_mode: Gtk.WrapMode.WORD,
+                monospace: true,
+                top_margin: 8,
+                bottom_margin: 8,
+                left_margin: 8,
+                right_margin: 8,
+            });
+            textView.buffer.set_text(text, -1);
+
+            const scrolled = new Gtk.ScrolledWindow({
+                child: textView,
+                vexpand: true,
+                hexpand: true,
+            });
+
+            const box = dialog.get_content_area();
+            const label = new Gtk.Label({
+                label: 'One correction per line: wrong=right',
+                halign: Gtk.Align.START,
+                margin_start: 8,
+                margin_top: 8,
+            });
+            box.append(label);
+            box.append(scrolled);
+
+            dialog.add_button('Cancel', Gtk.ResponseType.CANCEL);
+            dialog.add_button('Save', Gtk.ResponseType.OK);
+
+            dialog.connect('response', (dlg, response) => {
+                if (response === Gtk.ResponseType.OK) {
+                    let [start, end] = textView.buffer.get_bounds();
+                    let newText = textView.buffer.get_text(start, end, false);
+                    let newCorrections = {};
+                    for (let line of newText.split('\n')) {
+                        line = line.trim();
+                        if (!line || !line.includes('=')) continue;
+                        let [wrong, ...rightParts] = line.split('=');
+                        newCorrections[wrong.trim()] = rightParts.join('=').trim();
+                    }
+                    this._setConfigValue('auto_corrections', newCorrections);
+                    row.subtitle = `${Object.keys(newCorrections).length} corrections defined`;
+                }
+                dlg.destroy();
+            });
+
+            dialog.present();
+        });
+
+        row.add_suffix(editButton);
+        row.set_activatable_widget(editButton);
+        group.add(row);
+    }
+
+    _addShortcutRow(group, title, settingsKey) {
+        const shortcuts = this._settings.get_strv(settingsKey);
+        const currentShortcut = shortcuts.length > 0 ? shortcuts[0] : 'Disabled';
+
+        const row = new Adw.ActionRow({
+            title: title,
+            subtitle: currentShortcut,
+        });
+
+        const editButton = new Gtk.Button({
+            label: 'Change',
+            valign: Gtk.Align.CENTER,
+        });
+
+        editButton.connect('clicked', () => {
+            const dialog = new Adw.MessageDialog({
+                heading: `Set shortcut for "${title}"`,
+                body: 'Enter a keyboard shortcut (e.g. <Super><Alt>space):',
+                modal: true,
+            });
+
+            const entry = new Gtk.Entry({
+                text: currentShortcut,
+                margin_start: 16,
+                margin_end: 16,
+                margin_bottom: 8,
+            });
+            dialog.set_extra_child(entry);
+
+            dialog.add_response('cancel', 'Cancel');
+            dialog.add_response('save', 'Save');
+            dialog.add_response('disable', 'Disable');
+            dialog.set_response_appearance('save', Adw.ResponseAppearance.SUGGESTED);
+
+            dialog.connect('response', (dlg, response) => {
+                if (response === 'save') {
+                    let val = entry.get_text().trim();
+                    if (val) {
+                        this._settings.set_strv(settingsKey, [val]);
+                        row.subtitle = val;
+                    }
+                } else if (response === 'disable') {
+                    this._settings.set_strv(settingsKey, []);
+                    row.subtitle = 'Disabled';
+                }
+            });
+
+            dialog.present();
+        });
+
+        row.add_suffix(editButton);
+        row.set_activatable_widget(editButton);
+        group.add(row);
     }
 
     // ═══════════════════════════════════════════════════════════════════

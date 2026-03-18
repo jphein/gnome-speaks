@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 schemas/gschemas.compiled
 .claude/
+speech/chime_*.wav

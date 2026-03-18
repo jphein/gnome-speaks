@@ -17,7 +17,7 @@ const DBUS_XML = `
 <node>
   <interface name="org.gnome.Speaks">
     <method name="StartListening">
-      <arg direction="out" type="s" name="request_id"/>
+      <arg direction="out" type="s" name="result"/>
     </method>
     <method name="StopListening">
       <arg direction="out" type="s" name="transcription"/>
@@ -28,6 +28,22 @@ const DBUS_XML = `
     </method>
     <method name="SpeakClipboard">
       <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="SpeakSelection">
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="SetLanguage">
+      <arg direction="in" type="s" name="language"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="GetLanguage">
+      <arg direction="out" type="s" name="language"/>
+    </method>
+    <method name="ToggleConversationMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="ToggleContinuousDictation">
+      <arg direction="out" type="b" name="enabled"/>
     </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
@@ -43,6 +59,9 @@ const DBUS_XML = `
     </signal>
     <signal name="PartialTranscription">
       <arg type="s" name="text"/>
+    </signal>
+    <signal name="AudioLevel">
+      <arg type="d" name="level"/>
     </signal>
     <signal name="Error">
       <arg type="s" name="message"/>
@@ -101,17 +120,23 @@ export default class GnomeSpeaksExtension extends Extension {
         this._dragBadgeStartY = 0;
         this._customPosition = null;
         this._badgeVisible = true;
+        this._audioLevel = 0;
+        this._settings = this.getSettings();
 
         this._createBadge();
         this._createPanelIndicator();
         this._positionBadge();
         this._connectLayoutSignals();
+        this._registerKeybindings();
         this._initProxy();
+        this._connectNotificationReader();
     }
 
     disable() {
         this._cancelAllTimeouts();
         this._stopPulse();
+        this._disconnectNotificationReader();
+        this._removeKeybindings();
         this._disconnectLayoutSignals();
         this._disconnectProxy();
         this._destroyPanelIndicator();
@@ -119,6 +144,99 @@ export default class GnomeSpeaksExtension extends Extension {
 
         this._state = null;
         this._customPosition = null;
+        this._settings = null;
+    }
+
+    // -- Keyboard shortcuts ------------------------------------------------
+
+    _registerKeybindings() {
+        Main.wm.addKeybinding(
+            'toggle-listening-shortcut',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => {
+                if (this._state === States.LISTENING)
+                    this._callMethod('StopListening');
+                else if (this._state === States.IDLE)
+                    this._callMethod('StartListening');
+            }
+        );
+
+        Main.wm.addKeybinding(
+            'speak-clipboard-shortcut',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._callMethod('SpeakClipboard')
+        );
+
+        Main.wm.addKeybinding(
+            'read-selection-shortcut',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._callMethod('SpeakSelection')
+        );
+    }
+
+    _removeKeybindings() {
+        Main.wm.removeKeybinding('toggle-listening-shortcut');
+        Main.wm.removeKeybinding('speak-clipboard-shortcut');
+        Main.wm.removeKeybinding('read-selection-shortcut');
+    }
+
+    // -- Notification reader -----------------------------------------------
+
+    _connectNotificationReader() {
+        this._notifSourceAddedId = Main.messageTray.connect('source-added', (tray, source) => {
+            let notifAddedId = source.connect('notification-added', (src, notification) => {
+                this._onNotification(notification);
+            });
+            if (!this._notifSignals)
+                this._notifSignals = [];
+            this._notifSignals.push({obj: source, id: notifAddedId});
+        });
+    }
+
+    _disconnectNotificationReader() {
+        if (this._notifSourceAddedId) {
+            Main.messageTray.disconnect(this._notifSourceAddedId);
+            this._notifSourceAddedId = null;
+        }
+        if (this._notifSignals) {
+            for (let sig of this._notifSignals) {
+                try { sig.obj.disconnect(sig.id); } catch (e) { /* ok */ }
+            }
+            this._notifSignals = null;
+        }
+    }
+
+    _onNotification(notification) {
+        // Only read notifications if enabled in config
+        // Check by reading the speech-to-cli config
+        let configPath = GLib.build_filenamev([
+            GLib.get_home_dir(), '.config', 'speech-to-cli', 'config.json',
+        ]);
+        try {
+            let [ok, contents] = GLib.file_get_contents(configPath);
+            if (ok) {
+                let decoder = new TextDecoder('utf-8');
+                let config = JSON.parse(decoder.decode(contents));
+                if (!config.read_notifications)
+                    return;
+            }
+        } catch (e) {
+            return;
+        }
+
+        let title = notification.title || '';
+        let body = notification.body || '';
+        let text = title;
+        if (body)
+            text += `. ${body}`;
+        if (text && this._state === States.IDLE)
+            this._callMethod('Speak', text);
     }
 
     _createBadge() {
@@ -295,6 +413,35 @@ export default class GnomeSpeaksExtension extends Extension {
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
+        // ── Continuous Dictation toggle ──
+        this._menuContinuousToggle = new PopupMenu.PopupSwitchMenuItem('Continuous Dictation', false);
+        this._menuContinuousToggle.connect('toggled', () => {
+            this._callMethod('ToggleContinuousDictation');
+        });
+        menu.addMenuItem(this._menuContinuousToggle);
+
+        // ── Conversation Mode toggle ──
+        this._menuConversationToggle = new PopupMenu.PopupSwitchMenuItem('Conversation Mode', false);
+        this._menuConversationToggle.connect('toggled', () => {
+            this._callMethod('ToggleConversationMode');
+        });
+        menu.addMenuItem(this._menuConversationToggle);
+
+        // ── Language submenu ──
+        this._langSubMenu = new PopupMenu.PopupSubMenuMenuItem('Language: en-US');
+        let languages = ['en-US', 'en-GB', 'en-AU', 'de-DE', 'fr-FR', 'es-ES', 'it-IT', 'ja-JP', 'ko-KR', 'zh-CN', 'pt-BR', 'ru-RU', 'ar-SA', 'hi-IN', 'nl-NL'];
+        for (let lang of languages) {
+            let item = new PopupMenu.PopupMenuItem(lang);
+            item.connect('activate', () => {
+                this._callMethod('SetLanguage', lang);
+                this._langSubMenu.label.text = `Language: ${lang}`;
+            });
+            this._langSubMenu.menu.addMenuItem(item);
+        }
+        menu.addMenuItem(this._langSubMenu);
+
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
         // ── Toggle Badge ──
         this._menuBadgeToggle = new PopupMenu.PopupSwitchMenuItem('Show Badge', this._badgeVisible);
         this._menuBadgeToggle.connect('toggled', (item, state) => {
@@ -359,30 +506,9 @@ export default class GnomeSpeaksExtension extends Extension {
             this._menuListenItem = null;
             this._menuStopItem = null;
             this._menuBadgeToggle = null;
-        }
-    }
-
-    _toggleBadgeVisibility() {
-        this._badgeVisible = !this._badgeVisible;
-        if (this._badge) {
-            if (this._badgeVisible) {
-                this._badge.show();
-                this._badge.ease({
-                    opacity: 255,
-                    duration: 200,
-                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                });
-            } else {
-                this._badge.ease({
-                    opacity: 0,
-                    duration: 200,
-                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                    onComplete: () => {
-                        if (this._badge)
-                            this._badge.hide();
-                    },
-                });
-            }
+            this._menuContinuousToggle = null;
+            this._menuConversationToggle = null;
+            this._langSubMenu = null;
         }
     }
 
@@ -478,6 +604,11 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._proxySignals.push(partialId);
 
+        let audioLevelId = this._proxy.connectSignal('AudioLevel', (proxy, sender, [level]) => {
+            this._onAudioLevel(level);
+        });
+        this._proxySignals.push(audioLevelId);
+
         let errorId = this._proxy.connectSignal('Error', (proxy, sender, [message]) => {
             this._showError(message);
         });
@@ -548,8 +679,13 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         }
 
-        // Update panel icon
+        // Update panel icon and menu
         this._updatePanelIcon(newState);
+        this._updatePanelMenu();
+
+        // Reset audio level when leaving listening state
+        if (newState !== States.LISTENING)
+            this._audioLevel = 0;
 
         // Handle animations
         if (newState === States.LISTENING || newState === States.SPEAKING) {
@@ -772,6 +908,30 @@ export default class GnomeSpeaksExtension extends Extension {
         this._trackTimeout(timeoutId, 'error');
     }
 
+    // -- Audio level visualization -----------------------------------------
+
+    _onAudioLevel(level) {
+        this._audioLevel = level;
+        if (!this._badge || this._state !== States.LISTENING)
+            return;
+
+        // Scale the badge slightly based on audio level for visual feedback
+        let baseScale = 1.0;
+        let levelBoost = Math.min(level, 1.0) * 0.12;
+        let targetScale = baseScale + levelBoost;
+
+        // Only update if pulse isn't actively animating (avoid conflict)
+        if (this._pulseActive) {
+            // Modulate the pulse intensity based on level
+            this._badge.ease({
+                scale_x: targetScale,
+                scale_y: targetScale,
+                duration: 80,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+        }
+    }
+
     _showContextMenu(event) {
         this._destroyContextMenu();
 
@@ -799,11 +959,34 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._contextMenu.add_child(speakClipboardItem);
 
+        let readSelItem = this._createMenuItem('Read Selection', () => {
+            this._callMethod('SpeakSelection');
+            this._destroyContextMenu();
+        });
+        this._contextMenu.add_child(readSelItem);
+
         let stopItem = this._createMenuItem('Stop', () => {
             this._callMethod('Stop');
             this._destroyContextMenu();
         });
         this._contextMenu.add_child(stopItem);
+
+        let separator2 = new St.Widget({
+            style: 'height: 1px; background-color: rgba(255,255,255,0.1); margin: 4px 8px;',
+        });
+        this._contextMenu.add_child(separator2);
+
+        let hideItem = this._createMenuItem('Hide Badge', () => {
+            this._badgeVisible = false;
+            if (this._menuBadgeToggle)
+                this._menuBadgeToggle.setToggleState(false);
+            this._badge.ease({
+                opacity: 0, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                onComplete: () => { if (this._badge) this._badge.hide(); },
+            });
+            this._destroyContextMenu();
+        });
+        this._contextMenu.add_child(hideItem);
 
         Main.layoutManager.addTopChrome(this._contextMenu);
 

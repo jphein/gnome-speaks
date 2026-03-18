@@ -471,6 +471,9 @@ class GnomeSpeaksService:
         self._original_tts_region = CONFIG.get("tts_region")
         self._original_tts_key = CONFIG.get("tts_key")
 
+        # Conversation history (cleared when conversation mode toggled off)
+        self._conversation_history = []
+
     # -- State management --------------------------------------------------
 
     @property
@@ -725,7 +728,9 @@ class GnomeSpeaksService:
         end_word_event = threading.Event()
         sender_done = threading.Event()
         raw_frames = []
-        live_typing = CONFIG.get("dictation_mode", True) and _TYPING_TOOL in ("ydotool", "xdotool")
+        live_typing = (CONFIG.get("dictation_mode", True)
+                       and not CONFIG.get("conversation_mode", False)
+                       and _TYPING_TOOL in ("ydotool", "xdotool"))
         typed_partial = [""]  # mutable: text currently live-typed into the text field
         raw_partial = [""]    # unwindowed hypothesis text for live typing diff
 
@@ -1013,11 +1018,16 @@ class GnomeSpeaksService:
             self._speak_thread.start()
             return True
 
+    def _tts_level_cb(self, level):
+        """Emit AudioLevel from TTS audio stream for badge VU effect."""
+        GLib.idle_add(self._emit_audio_level, level)
+
     def _speak_worker(self, text):
         """Background thread: TTS using speech_tts.tts()."""
         try:
             state._cancel_event.clear()
-            result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None)
+            result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
+                                    audio_level_cb=self._tts_level_cb)
             if result.get("error"):
                 GLib.idle_add(self._emit_error, result["error"])
         except Exception as exc:
@@ -1099,6 +1109,7 @@ class GnomeSpeaksService:
 
             result = speech_tts.talk_fullduplex(
                 text, quality=self._voice_quality,
+                audio_level_cb=self._tts_level_cb,
             )
 
             if result.get("error"):
@@ -1133,6 +1144,9 @@ class GnomeSpeaksService:
     def toggle_conversation_mode(self):
         current = CONFIG.get("conversation_mode", False)
         CONFIG["conversation_mode"] = not current
+        if current:
+            # Turning off — clear conversation history
+            self._conversation_history.clear()
         log.info("Conversation mode: %s", not current)
         return not current
 
@@ -1159,6 +1173,7 @@ class GnomeSpeaksService:
         if conv and cont:
             CONFIG["conversation_mode"] = False
             CONFIG["continuous_dictation"] = False
+            self._conversation_history.clear()
             log.info("Hands-free mode: off")
             return False
         else:
@@ -1233,6 +1248,106 @@ class GnomeSpeaksService:
 
     # -- Conversation mode (voice -> LLM -> TTS) --------------------------
 
+    _TYPE_TAG_RE = re.compile(r'<type>(.*?)</type>', re.DOTALL)
+
+    _INTENT_PATTERNS = {
+        'time_query': re.compile(
+            r'\b(what time|what\'s the time|current time|what day'
+            r'|what is today|what date|when is it|today\'s date)\b', re.I),
+        'clipboard': re.compile(
+            r'\b(clipboard|paste|pasted|copied|what I copied)\b', re.I),
+        'app_context': re.compile(
+            r'\b(this window|this app|what app|what window|focused'
+            r'|current app|screen|what am I (using|running|in))\b', re.I),
+    }
+
+    _BASE_SYSTEM_PROMPT = (
+        "You are a voice assistant. Be terse \u2014 short sentences, no filler, no preamble. "
+        "Answer directly.\n"
+        "When asked to type, write, or draft text, wrap it in <type>...</type> tags. "
+        "Everything else is spoken aloud.\n"
+        "Only use <type> tags when the user explicitly asks you to type or write something."
+    )
+
+    # Parses gdbus Eval output like "(true, 'some-app')" → 'some-app'
+    _GDBUS_EVAL_RE = re.compile(r"\(true,\s*'([^']*)'\)")
+
+    def _detect_intents(self, text):
+        """Return list of intent keys matched by keyword patterns."""
+        return [k for k, pat in self._INTENT_PATTERNS.items() if pat.search(text)]
+
+    def _get_focused_app(self):
+        """Get the focused window's WM_CLASS via GNOME Shell eval."""
+        try:
+            result = subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.gnome.Shell",
+                 "--object-path", "/org/gnome/Shell",
+                 "--method", "org.gnome.Shell.Eval",
+                 "global.display.get_focus_window()?.get_wm_class() || ''"],
+                capture_output=True, text=True, timeout=1,
+            )
+            if result.returncode == 0:
+                m = self._GDBUS_EVAL_RE.search(result.stdout)
+                return m.group(1) if m and m.group(1) else None
+        except Exception:
+            pass
+        return None
+
+    def _get_clipboard_text(self):
+        """Get clipboard text (Wayland first, X11 fallback), truncated to 200 chars."""
+        for cmd in [["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"]]:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()[:200]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+    def _build_context(self, user_text):
+        """Build system prompt with dynamic context. Returns (system_prompt, history)."""
+        from datetime import datetime
+
+        custom = CONFIG.get("llm_system_prompt", "")
+        parts = [custom] if custom else [self._BASE_SYSTEM_PROMPT]
+
+        # Intent-based dynamic context injection
+        intents = self._detect_intents(user_text)
+
+        if 'time_query' in intents:
+            parts.append(f"Current time: {datetime.now().strftime('%I:%M %p, %A %B %d, %Y')}")
+
+        if 'app_context' in intents:
+            app = self._get_focused_app()
+            if app:
+                parts.append(f"Focused application: {app}")
+
+        if 'clipboard' in intents:
+            clip = self._get_clipboard_text()
+            if clip:
+                parts.append(f"Clipboard content: {clip}")
+
+        system_prompt = "\n".join(parts)
+
+        # Trim history to last 20 exchanges (40 messages)
+        history = self._conversation_history[-40:]
+        return system_prompt, history
+
+    def _parse_type_tags(self, reply):
+        """Extract <type>...</type> content and remaining spoken text.
+
+        Returns (type_text, speak_text). type_text is the concatenated
+        content of all <type> tags (to be typed at cursor). speak_text
+        is everything else (to be spoken aloud).
+        """
+        type_parts = self._TYPE_TAG_RE.findall(reply)
+        type_text = "\n".join(type_parts) if type_parts else ""
+        speak_text = self._TYPE_TAG_RE.sub("", reply).strip()
+        # Clean up leftover whitespace from tag removal
+        speak_text = re.sub(r'\s{2,}', ' ', speak_text)
+        return type_text, speak_text
+
     def _conversation_worker(self, user_text):
         """Send transcribed text to an LLM and speak the response."""
         try:
@@ -1241,20 +1356,23 @@ class GnomeSpeaksService:
             api_key = CONFIG.get("llm_api_key", "")
             provider = CONFIG.get("llm_provider", "anthropic")
             model = CONFIG.get("llm_model", "claude-opus-4-6")
-            system_prompt = CONFIG.get(
-                "llm_system_prompt",
-                "You are a helpful voice assistant. Keep responses concise and conversational.",
-            )
+
+            # Build system prompt with dynamic context + conversation history
+            system_prompt, history = self._build_context(user_text)
 
             reply = None
 
-            if provider == "cloud-chat-assistant":
-                reply = self._call_cloud_chat_assistant(user_text, model, system_prompt)
+            if provider in ("cloud-chat-assistant", "bedrock"):
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(history)
+                messages.append({"role": "user", "content": user_text})
+                reply = self._call_cloud_chat_assistant(messages, model)
             elif provider == "anthropic":
                 if not api_key:
                     GLib.idle_add(self._emit_error, "No Anthropic API key configured")
                     self._set_state("idle")
                     return
+                msgs = list(history) + [{"role": "user", "content": user_text}]
                 resp = http_requests.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
@@ -1266,7 +1384,7 @@ class GnomeSpeaksService:
                         "model": model,
                         "max_tokens": 1024,
                         "system": system_prompt,
-                        "messages": [{"role": "user", "content": user_text}],
+                        "messages": msgs,
                     },
                     timeout=30,
                 )
@@ -1277,26 +1395,21 @@ class GnomeSpeaksService:
                     GLib.idle_add(self._emit_error, "No OpenAI API key configured")
                     self._set_state("idle")
                     return
+                msgs = [{"role": "system", "content": system_prompt}]
+                msgs.extend(history)
+                msgs.append({"role": "user", "content": user_text})
                 resp = http_requests.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_text},
-                        ],
-                        "max_tokens": 1024,
-                    },
+                    json={"model": model, "messages": msgs, "max_tokens": 1024},
                     timeout=30,
                 )
                 resp.raise_for_status()
                 reply = resp.json()["choices"][0]["message"]["content"]
             elif provider == "azure":
-                # Azure AI Foundry — uses cloud-chat-assistant config
                 cca_config = self._load_cca_config()
                 azure_key = cca_config.get("api_key", "")
                 endpoint = cca_config.get("endpoint", "")
@@ -1304,7 +1417,9 @@ class GnomeSpeaksService:
                     GLib.idle_add(self._emit_error, "Azure AI not configured in cloud-chat-assistant config")
                     self._set_state("idle")
                     return
-                # Check if serverless or deployed model
+                msgs = [{"role": "system", "content": system_prompt}]
+                msgs.extend(history)
+                msgs.append({"role": "user", "content": user_text})
                 serverless = [
                     "grok-3", "grok-3-mini", "DeepSeek-R1",
                     "Meta-Llama-3.1-405B-Instruct", "Meta-Llama-3.1-8B-Instruct",
@@ -1315,56 +1430,106 @@ class GnomeSpeaksService:
                 ]
                 if model in serverless:
                     url = f"{endpoint}/models/chat/completions?api-version=2024-12-01-preview"
-                    body = {"model": model, "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_text},
-                    ], "max_tokens": 1024}
+                    body = {"model": model, "messages": msgs, "max_tokens": 1024}
                 else:
                     url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview"
-                    body = {"messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_text},
-                    ], "max_tokens": 1024}
+                    body = {"messages": msgs, "max_tokens": 1024}
                 resp = http_requests.post(
                     url,
                     headers={"api-key": azure_key, "Content-Type": "application/json"},
-                    json=body,
-                    timeout=30,
+                    json=body, timeout=30,
                 )
                 resp.raise_for_status()
                 reply = resp.json()["choices"][0]["message"]["content"]
             elif provider == "google":
                 cca_config = self._load_cca_config()
                 google_key = cca_config.get("google_api_key", "")
-                project = cca_config.get("google_project", "")
-                region = cca_config.get("google_region", "us-central1")
                 if not google_key:
                     GLib.idle_add(self._emit_error, "Google API key not configured")
                     self._set_state("idle")
                     return
+                # Convert history to Google format
+                contents = []
+                for msg in history:
+                    role = "model" if msg["role"] == "assistant" else "user"
+                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                contents.append({"role": "user", "parts": [{"text": user_text}]})
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={google_key}"
                 resp = http_requests.post(
                     url,
                     headers={"Content-Type": "application/json"},
                     json={
                         "system_instruction": {"parts": [{"text": system_prompt}]},
-                        "contents": [{"parts": [{"text": user_text}]}],
+                        "contents": contents,
                     },
                     timeout=30,
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 reply = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            elif provider == "bedrock":
-                # AWS Bedrock — requires cloud-chat-assistant for SigV4 signing
-                reply = self._call_cloud_chat_assistant(user_text, model, system_prompt)
             else:
                 GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
                 self._set_state("idle")
                 return
 
             if reply:
-                self.speak(reply)
+                # Track conversation history
+                self._conversation_history.append({"role": "user", "content": user_text})
+                self._conversation_history.append({"role": "assistant", "content": reply})
+                # Parse <type>...</type> tags — type that text at cursor, speak the rest
+                type_text, speak_text = self._parse_type_tags(reply)
+                if type_text:
+                    log.info("Typing %d chars at cursor", len(type_text))
+                    type_at_cursor(type_text)
+
+                # If there's nothing left to speak, go idle
+                if not speak_text or not speak_text.strip():
+                    self._set_state("idle")
+                    _schedule_warmup()
+                    return
+
+                half_duplex = CONFIG.get("half_duplex", False)
+                self._set_state("speaking")
+                state._cancel_event.clear()
+                # Show reply text as live subtitle on badge
+                GLib.idle_add(self._emit_partial_transcription, speak_text)
+
+                if half_duplex:
+                    # Half-duplex: speak, then listen sequentially
+                    log.info("Conversation reply (half-duplex): %s", speak_text[:100])
+                    speech_tts.tts(speak_text, quality=self._voice_quality,
+                                    audio_level_cb=self._tts_level_cb)
+                    if state._cancel_event.is_set():
+                        self._set_state("idle")
+                        return
+                    # Listen for next turn
+                    self._set_state("listening")
+                    _prewarm_recorder()
+                    try:
+                        if HAS_WS:
+                            _get_stt_ws()
+                    except Exception:
+                        pass
+                    stt_result = stt_dispatch()
+                    user_reply = stt_result.get("text", "") if isinstance(stt_result, dict) else ""
+                else:
+                    # Full-duplex: speak + listen simultaneously
+                    log.info("Conversation reply (full-duplex): %s", speak_text[:100])
+                    result = speech_tts.talk_fullduplex(
+                        speak_text, quality=self._voice_quality,
+                        audio_level_cb=self._tts_level_cb,
+                    )
+                    user_reply = result.get("text", "")
+
+                if user_reply:
+                    user_reply = apply_voice_commands(user_reply)
+                    user_reply = apply_auto_corrections(user_reply)
+                    GLib.idle_add(self._emit_transcription_ready, user_reply)
+                    log.info("Conversation turn: %s", user_reply[:100])
+                    # Continue the conversation loop
+                    self._conversation_worker(user_reply)
+                    return
+                self._set_state("idle")
             else:
                 self._set_state("idle")
         except Exception as exc:
@@ -1382,8 +1547,8 @@ class GnomeSpeaksService:
         except Exception:
             return {}
 
-    def _call_cloud_chat_assistant(self, user_text, model, system_prompt):
-        """Call cloud-chat-assistant's call_llm function directly if available."""
+    def _call_cloud_chat_assistant(self, messages, model):
+        """Call cloud-chat-assistant's call_llm with a pre-built messages list."""
         cca_path = os.path.expanduser("~/Projects/cloud-chat-assistant")
         if os.path.isdir(cca_path):
             try:
@@ -1391,20 +1556,12 @@ class GnomeSpeaksService:
                 if cca_path not in sys.path:
                     sys.path.insert(0, cca_path)
                 import mcp_cloud_chat as cca
-                # Ensure cca uses the right config
                 cca_config = self._load_cca_config()
                 for k, v in cca_config.items():
                     cca.CONFIG[k] = v
-                # Set the model
                 cca.CONFIG["deployment"] = model
                 cca.CONFIG["model"] = model
                 cca.CONFIG["model_type"] = cca_config.get("model_type", "bedrock")
-                # Build messages
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ]
-                # Run async call in a new event loop
                 loop = asyncio.new_event_loop()
                 try:
                     import httpx
@@ -1421,12 +1578,20 @@ class GnomeSpeaksService:
                     loop.close()
             except Exception as exc:
                 log.warning("cloud-chat-assistant direct call failed: %s, falling back", exc)
-        # Fallback: use Anthropic API
+        # Fallback: use Anthropic API with messages converted
         import requests as http_requests
         api_key = CONFIG.get("llm_api_key", "")
         if not api_key:
             GLib.idle_add(self._emit_error, "No API key and cloud-chat-assistant unavailable")
             return None
+        # Extract system prompt and user/assistant messages for Anthropic format
+        system_prompt = ""
+        anthropic_msgs = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                anthropic_msgs.append(msg)
         resp = http_requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -1438,7 +1603,7 @@ class GnomeSpeaksService:
                 "model": model if "claude" in model else "claude-opus-4-6",
                 "max_tokens": 1024,
                 "system": system_prompt,
-                "messages": [{"role": "user", "content": user_text}],
+                "messages": anthropic_msgs,
             },
             timeout=30,
         )
@@ -1459,13 +1624,15 @@ class GnomeSpeaksService:
         state.cancel_active()
 
         # Wait for threads to finish with short timeouts
-        if self._stt_thread is not None:
+        # Skip joining the current thread (e.g. conversation mode calls speak() from STT thread)
+        current = threading.current_thread()
+        if self._stt_thread is not None and self._stt_thread is not current:
             self._stt_thread.join(timeout=3)
             self._stt_thread = None
-        if self._speak_thread is not None:
+        if self._speak_thread is not None and self._speak_thread is not current:
             self._speak_thread.join(timeout=3)
             self._speak_thread = None
-        if self._talk_thread is not None:
+        if self._talk_thread is not None and self._talk_thread is not current:
             self._talk_thread.join(timeout=3)
             self._talk_thread = None
 

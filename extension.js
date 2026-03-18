@@ -1095,7 +1095,7 @@ export default class GnomeSpeaksExtension extends Extension {
     _showPartialTranscription(text) {
         if (!this._badge || !this._label)
             return;
-        if (this._state !== 'listening')
+        if (this._state !== 'listening' && this._state !== 'speaking')
             return;
 
         // Debounce: skip if last update was < 50ms ago
@@ -1164,7 +1164,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
     _onAudioLevel(level) {
         this._audioLevel = level;
-        if (!this._badge || this._state !== States.LISTENING)
+        if (!this._badge || (this._state !== States.LISTENING && this._state !== States.SPEAKING))
             return;
 
         // Scale the badge slightly based on audio level for visual feedback

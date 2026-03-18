@@ -395,19 +395,32 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             const output = new TextDecoder('utf-8').decode(stdout);
             const lines = output.split('\n');
 
-            // Find the section header: "Sinks:" or "Sources:"
+            // Find the section header: "Sinks:" or "Sources:" within the Audio block
             const header = type === 'sinks' ? 'Sinks:' : 'Sources:';
+            let inAudio = false;
             let inSection = false;
 
             for (const line of lines) {
                 const trimmed = line.trim();
+
+                // Track whether we are inside the "Audio" top-level block so
+                // we don't accidentally match Video sinks/sources.
+                if (trimmed === 'Audio') {
+                    inAudio = true;
+                    continue;
+                }
+                if (inAudio && /^(Video|Settings)$/.test(trimmed)) {
+                    break;           // left the Audio block
+                }
+                if (!inAudio) continue;
 
                 if (trimmed.endsWith(header)) {
                     inSection = true;
                     continue;
                 }
 
-                // Stop at next section (empty line with │ only, or next header)
+                // Stop at next sub-section (empty pipe line, blank line, or a
+                // new header such as "Sink endpoints:" / "Streams:")
                 if (inSection && (trimmed === '│' || trimmed === '' ||
                     (trimmed.endsWith(':') && !trimmed.match(/^\d/)))) {
                     break;
@@ -415,9 +428,14 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
 
                 if (!inSection) continue;
 
-                // Parse lines like: " │  *   54. USB Audio Device Analog Stereo      [vol: 0.19]"
-                // or:               " │      33. Built-in Audio Analog Stereo        [vol: 0.65]"
-                const match = trimmed.match(/(\*?)\s*(\d+)\.\s+(.+?)\s+\[/);
+                // Strip leading box-drawing characters (│ ├ └ ─ etc.) so the
+                // regex only sees the device text, e.g.:
+                //   "│      35. USB Audio Device Analog Stereo      [vol: 0.19]"
+                //   "│  *   55. Built-in Audio Analog Stereo        [vol: 0.65]"
+                const stripped = trimmed.replace(/^[│├└─┬┤┼╌╎\s]+/, '');
+
+                // Match: optional "*", node ID, name, and optional "[...]" tail
+                const match = stripped.match(/^(\*?)\s*(\d+)\.\s+(.+?)(?:\s+\[.*\])?\s*$/);
                 if (match) {
                     const isDefault = match[1] === '*';
                     const nodeId = match[2];

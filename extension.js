@@ -330,6 +330,23 @@ export default class GnomeSpeaksExtension extends Extension {
         this._qualityPill.connect('button-press-event', () => Clutter.EVENT_STOP);
         this._badge.add_child(this._qualityPill);
 
+        // Mode pill — indicates Dict or Chat mode
+        this._conversationMode = false;
+        this._modePill = new St.Label({
+            text: 'Dict',
+            style_class: 'gnome-speaks-mode-dict',
+            reactive: true,
+            track_hover: true,
+        });
+        this._modePill.connect('button-release-event', (actor, event) => {
+            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+            this._toggleMode();
+            return Clutter.EVENT_STOP;
+        });
+        // Prevent pill clicks from triggering badge drag/click
+        this._modePill.connect('button-press-event', () => Clutter.EVENT_STOP);
+        this._badge.add_child(this._modePill);
+
         this._badge.set_pivot_point(0.5, 0.5);
 
         let pressId = this._badge.connect('button-press-event', (actor, event) => {
@@ -425,6 +442,37 @@ export default class GnomeSpeaksExtension extends Extension {
             isHD ? 'gnome-speaks-quality-hd' : 'gnome-speaks-quality-fast');
     }
 
+    _toggleMode() {
+        if (!this._proxy) return;
+        this._proxy.ToggleConversationModeRemote((result, error) => {
+            if (error) return;
+            let enabled = result[0];
+            this._conversationMode = enabled;
+            this._updateModePill();
+            // Sync the panel menu toggle (without re-triggering its callback)
+            if (this._menuConversationToggle)
+                this._menuConversationToggle.setToggleState(enabled);
+        });
+    }
+
+    _updateModePill() {
+        if (!this._modePill) return;
+        let isChat = this._conversationMode;
+        this._modePill.text = isChat ? 'Chat' : 'Dict';
+        this._modePill.remove_style_class_name(
+            isChat ? 'gnome-speaks-mode-dict' : 'gnome-speaks-mode-chat');
+        this._modePill.add_style_class_name(
+            isChat ? 'gnome-speaks-mode-chat' : 'gnome-speaks-mode-dict');
+
+        // Update badge border tint for chat mode
+        if (this._badge) {
+            if (isChat)
+                this._badge.add_style_class_name('gnome-speaks-chat-active');
+            else
+                this._badge.remove_style_class_name('gnome-speaks-chat-active');
+        }
+    }
+
     _destroyBadge() {
         for (let sig of this._signals) {
             try {
@@ -445,6 +493,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._icon = null;
         this._label = null;
         this._qualityPill = null;
+        this._modePill = null;
     }
 
     _createPanelIndicator() {
@@ -509,8 +558,17 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // ── Conversation Mode toggle ──
         this._menuConversationToggle = new PopupMenu.PopupSwitchMenuItem('Conversation Mode', false);
-        this._menuConversationToggle.connect('toggled', () => {
-            this._callMethod('ToggleConversationMode');
+        this._menuConversationToggle.connect('toggled', (item, state) => {
+            if (!this._proxy) return;
+            this._proxy.ToggleConversationModeRemote((result, error) => {
+                if (error) return;
+                let enabled = result[0];
+                this._conversationMode = enabled;
+                this._updateModePill();
+                // Re-sync toggle if service returned a different state than expected
+                if (enabled !== state)
+                    item.setToggleState(enabled);
+            });
         });
         menu.addMenuItem(this._menuConversationToggle);
 
@@ -746,6 +804,12 @@ export default class GnomeSpeaksExtension extends Extension {
                         ? 'Voice: HD' : 'Voice: Fast';
             }
         });
+
+        // No GetConversationMode D-Bus method — initialize to dict mode
+        this._conversationMode = false;
+        this._updateModePill();
+        if (this._menuConversationToggle)
+            this._menuConversationToggle.setToggleState(false);
     }
 
     _setState(newState) {

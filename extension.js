@@ -575,7 +575,8 @@ export default class GnomeSpeaksExtension extends Extension {
     _buildPanelMenu() {
         let menu = this._panelButton.menu;
 
-        // ── Listen / Stop ──
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Actions'));
+
         this._menuListenItem = new PopupMenu.PopupMenuItem('Start Listening');
         this._menuListenItem.connect('activate', () => {
             if (this._state === States.LISTENING)
@@ -585,40 +586,27 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         menu.addMenuItem(this._menuListenItem);
 
-        // ── Stop ──
         this._menuStopItem = new PopupMenu.PopupMenuItem('Stop');
         this._menuStopItem.connect('activate', () => {
             this._callMethod('Stop');
         });
         menu.addMenuItem(this._menuStopItem);
 
-        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        // ── Speak Clipboard ──
         let speakClipItem = new PopupMenu.PopupMenuItem('Speak Clipboard');
         speakClipItem.connect('activate', () => {
             this._callMethod('SpeakClipboard');
         });
         menu.addMenuItem(speakClipItem);
 
-        // ── Read Selection ──
         let readSelItem = new PopupMenu.PopupMenuItem('Read Selection');
         readSelItem.connect('activate', () => {
             this._callMethod('SpeakSelection');
         });
         menu.addMenuItem(readSelItem);
 
-        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Mode'));
 
-        // ── Continuous Dictation toggle ──
-        this._menuContinuousToggle = new PopupMenu.PopupSwitchMenuItem('Continuous Dictation', false);
-        this._menuContinuousToggle.connect('toggled', () => {
-            this._callMethod('ToggleContinuousDictation');
-        });
-        menu.addMenuItem(this._menuContinuousToggle);
-
-        // ── Conversation Mode toggle ──
-        this._menuConversationToggle = new PopupMenu.PopupSwitchMenuItem('Conversation Mode', false);
+        this._menuConversationToggle = new PopupMenu.PopupSwitchMenuItem('AI Conversation', false);
         this._menuConversationToggle.connect('toggled', (item, state) => {
             if (!this._proxy) return;
             this._proxy.ToggleConversationModeRemote((result, error) => {
@@ -626,25 +614,35 @@ export default class GnomeSpeaksExtension extends Extension {
                 let enabled = result[0];
                 this._conversationMode = enabled;
                 this._updateModePill();
-                // Re-sync toggle if service returned a different state than expected
                 if (enabled !== state)
                     item.setToggleState(enabled);
             });
         });
         menu.addMenuItem(this._menuConversationToggle);
 
-        // ── Voice Quality toggle (HD ↔ Fast) ──
+        this._menuContinuousToggle = new PopupMenu.PopupSwitchMenuItem('Continuous Dictation', false);
+        this._menuContinuousToggle.connect('toggled', () => {
+            this._callMethod('ToggleContinuousDictation');
+        });
+        menu.addMenuItem(this._menuContinuousToggle);
+
+        this._menuHandsFreeToggle = new PopupMenu.PopupSwitchMenuItem('Hands-Free', false);
+        this._menuHandsFreeToggle.connect('toggled', () => {
+            this._callMethod('ToggleHandsFree');
+        });
+        menu.addMenuItem(this._menuHandsFreeToggle);
+
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Voice & Audio'));
+
         this._voiceQuality = 'hd';
         this._menuVoiceQualityItem = new PopupMenu.PopupMenuItem('Voice: HD');
         this._menuVoiceQualityItem.connect('activate', () => this._toggleVoiceQuality());
         menu.addMenuItem(this._menuVoiceQualityItem);
 
-        // ── Audio Device info (read-only) ──
         this._menuAudioInfoItem = new PopupMenu.PopupMenuItem('Audio: detecting...');
         this._menuAudioInfoItem.setSensitive(false);
         menu.addMenuItem(this._menuAudioInfoItem);
 
-        // ── Language submenu ──
         this._langSubMenu = new PopupMenu.PopupSubMenuMenuItem('Language: en-US');
         let languages = ['en-US', 'en-GB', 'en-AU', 'de-DE', 'fr-FR', 'es-ES', 'it-IT', 'ja-JP', 'ko-KR', 'zh-CN', 'pt-BR', 'ru-RU', 'ar-SA', 'hi-IN', 'nl-NL'];
         for (let lang of languages) {
@@ -659,7 +657,6 @@ export default class GnomeSpeaksExtension extends Extension {
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // ── Toggle Badge ──
         this._menuBadgeToggle = new PopupMenu.PopupSwitchMenuItem('Show Badge', this._badgeVisible);
         this._menuBadgeToggle.connect('toggled', (item, state) => {
             this._badgeVisible = state;
@@ -677,10 +674,7 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         menu.addMenuItem(this._menuBadgeToggle);
 
-        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        // ── Settings ──
-        let settingsItem = new PopupMenu.PopupMenuItem('Settings');
+        let settingsItem = new PopupMenu.PopupMenuItem('Preferences...');
         settingsItem.connect('activate', () => {
             this.openPreferences();
         });
@@ -725,6 +719,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._menuBadgeToggle = null;
             this._menuContinuousToggle = null;
             this._menuConversationToggle = null;
+            this._menuHandsFreeToggle = null;
             this._menuVoiceQualityItem = null;
             this._menuAudioInfoItem = null;
             this._langSubMenu = null;

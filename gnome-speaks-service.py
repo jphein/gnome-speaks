@@ -126,6 +126,12 @@ INTROSPECTION_XML = """
     <method name="ToggleContinuousDictation">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="ToggleVoiceQuality">
+      <arg direction="out" type="s" name="quality"/>
+    </method>
+    <method name="GetVoiceQuality">
+      <arg direction="out" type="s" name="quality"/>
+    </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
     </method>
@@ -188,18 +194,91 @@ def clipboard_write(text):
 
 
 _TYPING_TOOL = None
+_YDOTOOL_V1 = False  # True if ydotool >= 1.0 (daemon mode, different CLI flags)
 
 
 def _detect_typing_tool():
     """Detect the best available typing tool at startup (avoids repeated PATH lookups)."""
-    global _TYPING_TOOL
+    global _TYPING_TOOL, _YDOTOOL_V1
     if shutil.which("ydotool"):
         _TYPING_TOOL = "ydotool"
+        _YDOTOOL_V1 = shutil.which("ydotoold") is not None or _is_ydotoold_running()
+        if _YDOTOOL_V1:
+            log.info("Typing tool: ydotool v1.0+ (daemon mode)")
+        else:
+            log.info("Typing tool: ydotool v0.x (no daemon)")
     elif shutil.which("xdotool"):
         _TYPING_TOOL = "xdotool"
+        log.info("Typing tool: xdotool")
     else:
         _TYPING_TOOL = "clipboard"
-    log.info("Typing tool: %s", _TYPING_TOOL)
+        log.info("Typing tool: clipboard (install ydotool for live typing)")
+
+
+def _is_ydotoold_running():
+    """Check if ydotoold daemon is running."""
+    try:
+        result = subprocess.run(["pidof", "ydotoold"], capture_output=True, timeout=2)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _send_backspaces(count):
+    """Send N backspace keypresses via ydotool or xdotool. Blocks until complete."""
+    if count <= 0:
+        return
+    if _TYPING_TOOL == "ydotool":
+        if _YDOTOOL_V1:
+            # v1.0+: -d for key-delay, repeat by listing key pairs N times
+            # Listing all pairs is more reliable than --repeat which doesn't exist in v1
+            keys = ["14:1", "14:0"] * count
+            subprocess.run(
+                ["ydotool", "key", "-d", "1"] + keys,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        else:
+            # v0.1.x: --delay for device registration, --key-delay, --repeat
+            subprocess.run(
+                ["ydotool", "key", "--delay", "50", "--key-delay", "0",
+                 "--repeat", str(count), "14:1", "14:0"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+    elif _TYPING_TOOL == "xdotool" and os.environ.get("DISPLAY"):
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers"] + ["BackSpace"] * count,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+
+
+def _type_raw(text):
+    """Type text at the cursor. Blocks until complete."""
+    if not text:
+        return
+    if _TYPING_TOOL == "ydotool":
+        if _YDOTOOL_V1:
+            # v1.0+: pipe text via stdin to avoid argument-parsing space issues
+            subprocess.run(
+                ["ydotool", "type", "-d", "3", "--file", "-"],
+                input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        else:
+            # v0.1.x: --delay for device registration, --key-delay between chars
+            subprocess.run(
+                ["ydotool", "type", "--delay", "50", "--key-delay", "0", "--", text],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+    elif _TYPING_TOOL == "xdotool" and os.environ.get("DISPLAY"):
+        subprocess.run(
+            ["xdotool", "type", "--clearmodifiers", "--", text],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
 
 
 def type_at_cursor(text):
@@ -210,24 +289,62 @@ def type_at_cursor(text):
     # Brief delay to let focus settle after badge interaction
     time.sleep(0.05)
 
-    if _TYPING_TOOL == "ydotool":
-        subprocess.Popen(
-            ["ydotool", "type", "--", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-
-    if _TYPING_TOOL == "xdotool" and os.environ.get("DISPLAY"):
-        subprocess.Popen(
-            ["xdotool", "type", "--clearmodifiers", "--", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    _type_raw(text)
+    if _TYPING_TOOL in ("ydotool", "xdotool"):
         return True
 
     log.warning("No typing tool available (install ydotool), copying to clipboard instead")
     return clipboard_write(text)
+
+
+def _clipboard_paste(text):
+    """Copy text to clipboard and paste via Ctrl+Shift+V (terminals) or Ctrl+V."""
+    try:
+        subprocess.run(["wl-copy", "--", text], timeout=2,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+    time.sleep(0.01)
+    if _TYPING_TOOL == "ydotool":
+        if _YDOTOOL_V1:
+            # Ctrl(29) + Shift(42) + V(47) — works in terminals and most apps
+            subprocess.run(
+                ["ydotool", "key", "-d", "3",
+                 "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        else:
+            subprocess.run(
+                ["ydotool", "key", "--delay", "50", "--key-delay", "3",
+                 "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+    return True
+
+
+def replace_typed_text(old_text, new_text):
+    """Update live-typed text. Append-only when possible to avoid visual flicker.
+
+    If new_text is an extension of old_text, just type the new suffix (fast, smooth).
+    If it's a revision, erase and paste via clipboard (atomic, reliable).
+    """
+    if _TYPING_TOOL not in ("ydotool", "xdotool"):
+        return  # clipboard mode can't do live partials
+    if old_text == new_text:
+        return
+    # Append-only: Azure hypotheses almost always extend the previous one
+    if new_text.startswith(old_text):
+        suffix = new_text[len(old_text):]
+        if suffix:
+            _type_raw(suffix)
+    else:
+        # Hypothesis revised earlier text — erase and paste via clipboard
+        if old_text:
+            _send_backspaces(len(old_text))
+            time.sleep(0.01)
+        _clipboard_paste(new_text)
 
 
 def selection_read():
@@ -312,6 +429,11 @@ class GnomeSpeaksService:
 
         # DBus connection (set after registration)
         self._connection = None
+
+        # Voice quality toggle (hd = DragonHD + eastus, fast = Neural + westus)
+        self._voice_quality = "hd"
+        self._original_tts_region = CONFIG.get("tts_region")
+        self._original_tts_key = CONFIG.get("tts_key")
 
     # -- State management --------------------------------------------------
 
@@ -489,16 +611,16 @@ class GnomeSpeaksService:
         end_word_event = threading.Event()
         sender_done = threading.Event()
         raw_frames = []
+        live_typing = CONFIG.get("dictation_mode", True) and _TYPING_TOOL in ("ydotool", "xdotool")
+        typed_partial = [""]  # mutable: text currently live-typed into the text field
+        raw_partial = [""]    # unwindowed hypothesis text for live typing diff
 
         # 4. Sender thread: read audio frames, send to WS with VAD
+        #    Inline calibration: send every frame to Azure immediately (including
+        #    calibration frames) so Azure gets speech ASAP. We only need the
+        #    energy threshold locally for silence detection.
         def send_audio():
             try:
-                energy_threshold, cal_frames = calibrate_noise(proc)
-                _log(f"calibrated: threshold={energy_threshold:.0f}, cal_frames={len(cal_frames)}")
-
-                for frame in cal_frames:
-                    ws.send(_make_ws_audio_msg(request_id, frame), opcode=websocket.ABNF.OPCODE_BINARY)
-
                 vad = webrtcvad.Vad(state.VAD_AGGRESSIVENESS) if HAS_VAD else None
                 silence_frames = 0
                 speech_frames = 0
@@ -507,7 +629,19 @@ class GnomeSpeaksService:
                 max_no_speech = int(state.NO_SPEECH_TIMEOUT * 1000 / FRAME_MS)
                 min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)
                 max_frames = int(MAX_LISTEN_SECONDS * 1000 / FRAME_MS)
-                _log(f"limits: max_silence={max_silence} max_no_speech={max_no_speech} min_speech={min_speech}")
+
+                # Inline calibration: use cached threshold or calibrate from
+                # the first N frames, but send each frame to Azure as we read it
+                cal_n = state.ENERGY_CALIBRATION_FRAMES
+                if state._cached_noise_threshold is not None and (time.time() - state._cached_noise_time) < state.NOISE_CACHE_TTL:
+                    energy_threshold = state._cached_noise_threshold
+                    cal_n = 0
+                    _log(f"using cached noise threshold={energy_threshold:.0f}")
+                else:
+                    energy_threshold = 0  # calibrated below from first cal_n frames
+                cal_energies = []
+
+                _log(f"limits: max_silence={max_silence} max_no_speech={max_no_speech} min_speech={min_speech} cal_n={cal_n}")
 
                 while not self._stop_event.is_set():
                     chunk = proc.stdout.read(FRAME_BYTES)
@@ -523,12 +657,23 @@ class GnomeSpeaksService:
                         _log(f"WS send error at frame {total_frames}: {exc}")
                         break
 
+                    energy = rms_energy(chunk)
                     total_frames += 1
 
                     # Emit audio level for badge visualization
-                    level = rms_energy(chunk) / 10000.0
-                    if total_frames % 3 == 0:  # Throttle to every 3rd frame
-                        GLib.idle_add(self._emit_audio_level, min(level, 1.0))
+                    if total_frames % 3 == 0:
+                        GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
+
+                    # Inline calibration from first N frames
+                    if total_frames <= cal_n:
+                        cal_energies.append(energy)
+                        if total_frames == cal_n:
+                            ambient = sum(cal_energies) / len(cal_energies)
+                            energy_threshold = max(ambient * state.ENERGY_THRESHOLD_MULTIPLIER, 300.0)
+                            state._cached_noise_threshold = energy_threshold
+                            state._cached_noise_time = time.time()
+                            _log(f"calibrated: threshold={energy_threshold:.0f}")
+                        continue  # skip VAD during calibration
 
                     if is_speech_energy(chunk, vad, energy_threshold):
                         speech_frames += 1
@@ -587,12 +732,16 @@ class GnomeSpeaksService:
             except Exception:
                 break
 
-            mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log)
+            mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
+                                  raw_partial_holder=raw_partial)
 
             if mtype == "hypothesis":
                 text = partial_holder[0]
                 if text:
                     GLib.idle_add(self._emit_partial_transcription, text)
+                    if live_typing:
+                        replace_typed_text(typed_partial[0], raw_partial[0])
+                        typed_partial[0] = raw_partial[0]
             elif mtype == "phrase":
                 got_phrase = True
                 text = partial_holder[0]
@@ -629,7 +778,8 @@ class GnomeSpeaksService:
                     msg = ws.recv()
                 except Exception:
                     break
-                mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log)
+                mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
+                                      raw_partial_holder=raw_partial)
                 if mtype == "phrase":
                     got_phrase = True
                     text = partial_holder[0]
@@ -667,17 +817,32 @@ class GnomeSpeaksService:
 
             # Conversation mode: send to LLM then speak response
             if CONFIG.get("conversation_mode", False):
+                if live_typing:
+                    # Erase partial before conversation mode takes over
+                    _send_backspaces(len(typed_partial[0]))
+                    time.sleep(0.02)
                 self._conversation_worker(user_text)
                 _schedule_warmup()
                 return
 
             # Type at cursor (dictation mode) or just copy to clipboard
             if CONFIG.get("dictation_mode", True):
-                type_at_cursor(user_text)
+                if live_typing:
+                    # Erase the live partial and paste the clean final text
+                    _send_backspaces(len(typed_partial[0]))
+                    time.sleep(0.02)
+                    _clipboard_paste(user_text)
+                else:
+                    type_at_cursor(user_text)
             else:
+                if live_typing and typed_partial[0]:
+                    _send_backspaces(len(typed_partial[0]))
                 clipboard_write(user_text)
         else:
             log.info("No speech detected")
+            # Erase any partial that was live-typed
+            if live_typing and typed_partial[0]:
+                _send_backspaces(len(typed_partial[0]))
             GLib.idle_add(self._emit_transcription_ready, "")
 
         self._set_state("idle")
@@ -736,7 +901,7 @@ class GnomeSpeaksService:
         """Background thread: TTS using speech_tts.tts()."""
         try:
             state._cancel_event.clear()
-            result = speech_tts.tts(text, quality="hd", progress_token=None)
+            result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None)
             if result.get("error"):
                 GLib.idle_add(self._emit_error, result["error"])
         except Exception as exc:
@@ -787,6 +952,31 @@ class GnomeSpeaksService:
         CONFIG["continuous_dictation"] = not current
         log.info("Continuous dictation: %s", not current)
         return not current
+
+    def toggle_voice_quality(self):
+        """Toggle between HD (DragonHD, eastus) and Fast (Neural, westus) voice modes.
+
+        Returns the new quality string: 'fast' or 'hd'.
+        """
+        current = self._voice_quality
+        if current == "hd":
+            self._voice_quality = "fast"
+            # Use STT region for faster TTS latency
+            CONFIG["tts_region"] = None
+            CONFIG["tts_key"] = None
+            log.info("Voice quality: fast (%s, region=%s)",
+                     CONFIG["fast_voice"], CONFIG["region"])
+        else:
+            self._voice_quality = "hd"
+            # Restore HD region for DragonHD voices
+            CONFIG["tts_region"] = self._original_tts_region
+            CONFIG["tts_key"] = self._original_tts_key
+            log.info("Voice quality: hd (%s, region=%s)",
+                     CONFIG["voice"], CONFIG.get("tts_region") or CONFIG["region"])
+        return self._voice_quality
+
+    def get_voice_quality(self):
+        return self._voice_quality
 
     # -- Conversation mode (voice -> LLM -> TTS) --------------------------
 
@@ -1089,6 +1279,14 @@ class DBusHandler:
             elif method_name == "ToggleContinuousDictation":
                 result = self.service.toggle_continuous_dictation()
                 invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "ToggleVoiceQuality":
+                result = self.service.toggle_voice_quality()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "GetVoiceQuality":
+                result = self.service.get_voice_quality()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
 
             elif method_name == "Stop":
                 # Stop can block while joining threads — run async

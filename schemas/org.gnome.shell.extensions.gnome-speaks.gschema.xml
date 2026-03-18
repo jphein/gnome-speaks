@@ -68,6 +68,12 @@
       <description>Keyboard shortcut to read selected text aloud.</description>
     </key>
 
+    <key name="toggle-voice-quality-shortcut" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;v']</default>
+      <summary>Toggle voice quality shortcut</summary>
+      <description>Keyboard shortcut to switch between HD (DragonHD) and Fast (Neural) voice modes.</description>
+    </key>
+
   </schema>
 
 </schemalist>

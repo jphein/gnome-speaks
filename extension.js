@@ -54,6 +54,12 @@ const DBUS_XML = `
     <method name="ToggleContinuousDictation">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="ToggleVoiceQuality">
+      <arg direction="out" type="s" name="quality"/>
+    </method>
+    <method name="GetVoiceQuality">
+      <arg direction="out" type="s" name="quality"/>
+    </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
     </method>
@@ -139,9 +145,32 @@ export default class GnomeSpeaksExtension extends Extension {
         this._registerKeybindings();
         this._initProxy();
         this._connectNotificationReader();
+
+        // Watch for service restarts — re-sync state when the bus name reappears
+        this._busWatchId = Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            DBUS_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            () => {
+                // Name appeared (service started or restarted)
+                if (this._proxy)
+                    this._syncState();
+                else
+                    this._initProxy();
+            },
+            () => {
+                // Name vanished (service stopped) — reset badge to idle
+                this._setState(States.IDLE);
+            },
+        );
     }
 
     disable() {
+        if (this._busWatchId) {
+            Gio.bus_unwatch_name(this._busWatchId);
+            this._busWatchId = 0;
+        }
+
         this._cancelAllTimeouts();
         this._stopPulse();
         this._disconnectNotificationReader();
@@ -187,12 +216,33 @@ export default class GnomeSpeaksExtension extends Extension {
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._callMethod('SpeakSelection')
         );
+
+        Main.wm.addKeybinding(
+            'toggle-voice-quality-shortcut',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => {
+                if (!this._proxy) return;
+                this._proxy.ToggleVoiceQualityRemote((result, error) => {
+                    if (error) return;
+                    let quality = result[0];
+                    this._voiceQuality = quality;
+                    if (this._menuVoiceQualityItem)
+                        this._menuVoiceQualityItem.label.text = quality === 'hd'
+                            ? 'Voice: HD' : 'Voice: Fast';
+                    // Brief badge flash to confirm
+                    this._showTranscription(quality === 'hd' ? 'HD Voice' : 'Fast Voice');
+                });
+            }
+        );
     }
 
     _removeKeybindings() {
         Main.wm.removeKeybinding('toggle-listening-shortcut');
         Main.wm.removeKeybinding('speak-clipboard-shortcut');
         Main.wm.removeKeybinding('read-selection-shortcut');
+        Main.wm.removeKeybinding('toggle-voice-quality-shortcut');
     }
 
     // -- Notification reader -----------------------------------------------
@@ -436,6 +486,21 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         menu.addMenuItem(this._menuConversationToggle);
 
+        // ── Voice Quality toggle (HD ↔ Fast) ──
+        this._voiceQuality = 'hd';
+        this._menuVoiceQualityItem = new PopupMenu.PopupMenuItem('Voice: HD');
+        this._menuVoiceQualityItem.connect('activate', () => {
+            if (!this._proxy) return;
+            this._proxy.ToggleVoiceQualityRemote((result, error) => {
+                if (error) return;
+                let quality = result[0];
+                this._voiceQuality = quality;
+                this._menuVoiceQualityItem.label.text = quality === 'hd'
+                    ? 'Voice: HD' : 'Voice: Fast';
+            });
+        });
+        menu.addMenuItem(this._menuVoiceQualityItem);
+
         // ── Language submenu ──
         this._langSubMenu = new PopupMenu.PopupSubMenuMenuItem('Language: en-US');
         let languages = ['en-US', 'en-GB', 'en-AU', 'de-DE', 'fr-FR', 'es-ES', 'it-IT', 'ja-JP', 'ko-KR', 'zh-CN', 'pt-BR', 'ru-RU', 'ar-SA', 'hi-IN', 'nl-NL'];
@@ -517,6 +582,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._menuBadgeToggle = null;
             this._menuContinuousToggle = null;
             this._menuConversationToggle = null;
+            this._menuVoiceQualityItem = null;
             this._langSubMenu = null;
         }
     }
@@ -649,6 +715,16 @@ export default class GnomeSpeaksExtension extends Extension {
             }
             if (result && result[0])
                 this._setState(result[0]);
+        });
+
+        // Sync voice quality label
+        this._proxy.GetVoiceQualityRemote((result, error) => {
+            if (!error && result && result[0]) {
+                this._voiceQuality = result[0];
+                if (this._menuVoiceQualityItem)
+                    this._menuVoiceQualityItem.label.text = result[0] === 'hd'
+                        ? 'Voice: HD' : 'Voice: Fast';
+            }
         });
     }
 

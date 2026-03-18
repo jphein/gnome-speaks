@@ -7,15 +7,18 @@ A GNOME Shell extension that adds voice interaction to your desktop — speech-t
 - **Floating voice badge** — glassmorphism-styled status indicator with pulse animations
 - **Panel menu** — quick access to all voice actions from the top bar
 - **Speech-to-text** — real-time streaming transcription via Azure WebSocket STT
-- **Text-to-speech** — HD voice synthesis (DragonHD) with streaming playback
-- **Keyboard shortcuts** — `Super+Alt+Space` (listen), `Super+Alt+C` (speak clipboard), `Super+Alt+R` (read selection)
-- **Dictation mode** — transcribed text is typed at the cursor position
+- **Live typing** — partial transcriptions appear in the text field as you speak, replaced by the final text when done
+- **Text-to-speech** — HD and Fast voice modes (DragonHD / Neural) with streaming playback
+- **Voice quality toggle** — switch between HD (DragonHD, eastus) and Fast (Neural, westus) modes via `Super+Alt+V` or the panel menu
+- **Keyboard shortcuts** — `Super+Alt+Space` (listen), `Super+Alt+C` (speak clipboard), `Super+Alt+R` (read selection), `Super+Alt+V` (toggle voice quality)
+- **Dictation mode** — transcribed text is typed at the cursor position via ydotool (Wayland) or xdotool (X11)
 - **Conversation mode** — voice-to-LLM-to-voice with support for Anthropic, OpenAI, Azure AI, Google Vertex, and AWS Bedrock
 - **Continuous dictation** — keeps listening after each utterance
-- **Voice commands** — built-in commands for common actions
+- **Voice commands** — spoken punctuation ("period", "comma", "new line") converted to characters
 - **Auto-corrections** — custom find-and-replace rules applied to transcriptions
 - **Language switching** — change STT/TTS language on the fly (15 languages)
 - **Audio visualization** — badge scales with microphone input level
+- **Service auto-reconnect** — badge resets automatically when the service restarts
 
 ## Architecture
 
@@ -24,14 +27,15 @@ GNOME Shell process                    Background service
 ┌─────────────────┐     D-Bus IPC     ┌──────────────────────┐
 │  extension.js   │◄──────────────────►│ gnome-speaks-service │
 │  (UI only)      │   org.gnome.Speaks │  (Python)            │
-│  - badge        │                    │  - audio capture     │
+│  - badge        │                    │  - PipeWire capture  │
 │  - panel menu   │                    │  - Azure STT (WS)    │
 │  - keybindings  │                    │  - Azure TTS (REST)  │
-│  - settings     │                    │  - LLM integration   │
+│  - settings     │                    │  - ydotool live type │
+│  - bus watcher  │                    │  - LLM integration   │
 └─────────────────┘                    └──────────────────────┘
 ```
 
-The extension runs inside GNOME Shell's process and handles only UI. All network calls, audio I/O, and speech processing happen in a separate Python service communicating over the session D-Bus.
+The extension runs inside GNOME Shell's process and handles only UI. All network calls, audio I/O, and speech processing happen in a separate Python service communicating over the session D-Bus. Live typing uses ydotool (or xdotool) to inject keystrokes via `/dev/uinput`, bypassing Wayland's input restrictions.
 
 ## Requirements
 
@@ -43,14 +47,29 @@ The extension runs inside GNOME Shell's process and handles only UI. All network
 ### Python dependencies
 
 ```
-requests websocket-client webrtcvad
+requests websocket-client webrtcvad numpy
 ```
 
 ### System tools
 
 ```
-pw-record aplay glib-compile-schemas wl-paste
+pw-record aplay glib-compile-schemas wl-paste ydotool
 ```
+
+#### ydotool (recommended: v1.0+ from source)
+
+The packaged version on Ubuntu 24.04 (v0.1.8) works but adds ~50ms latency per keystroke.
+For instant live typing, build v1.0+ from source to get the `ydotoold` daemon:
+
+```bash
+sudo apt install -y cmake scdoc git build-essential
+git clone https://github.com/ReimuNotMoe/ydotool.git /tmp/ydotool
+cd /tmp/ydotool && mkdir build && cd build && cmake .. && make -j$(nproc)
+sudo make install
+sudo systemctl enable --now ydotool.service
+```
+
+The service auto-detects whether `ydotoold` is running and adjusts accordingly.
 
 ## Installation
 
@@ -97,11 +116,19 @@ Create `~/.config/speech-to-cli/config.json`:
     "region": "westus",
     "tts_region": "eastus",
     "voice": "en-US-Ava:DragonHDLatestNeural",
-    "fast_voice": "en-US-AvaNeural"
+    "fast_voice": "en-US-AvaNeural",
+    "language": "en-US"
 }
 ```
 
-Or set the `AZURE_SPEECH_KEY` environment variable.
+| Key | Description |
+|-----|-------------|
+| `key` | Azure Speech API key (or set `AZURE_SPEECH_KEY` env var) |
+| `region` | STT region and fast-voice TTS region (e.g., `westus`) |
+| `tts_region` | HD voice TTS region (e.g., `eastus` — DragonHD voices are only available in select regions) |
+| `voice` | HD voice name (used in HD quality mode) |
+| `fast_voice` | Fast voice name (used in Fast quality mode) |
+| `language` | STT/TTS language code |
 
 You can get a free Azure Speech key at [Azure Portal](https://portal.azure.com) — the free tier includes 500K characters/month for TTS and 5 hours/month for STT.
 
@@ -122,8 +149,20 @@ Settings include voice selection (HD/fast), silence timeout, keyboard shortcuts,
 | `Super+Alt+Space` | Toggle listening (start/stop STT) |
 | `Super+Alt+C` | Speak clipboard contents aloud |
 | `Super+Alt+R` | Read selected text aloud |
+| `Super+Alt+V` | Toggle voice quality (HD / Fast) |
 
 All shortcuts are configurable in the extension preferences.
+
+## Performance
+
+The service is optimized for low-latency voice interaction:
+
+- **Prewarmed connections** — recorder process, STT WebSocket, and TTS HTTP session are kept alive between uses
+- **Inline noise calibration** — audio frames are sent to Azure while calibrating (no blocking delay)
+- **WebSocket reuse** — persistent STT connection saves ~230ms per utterance
+- **Numpy RMS fast-path** — SIMD-vectorized audio energy calculation (~5-10x faster)
+- **Diff-aware live typing** — only erases and retypes the changed suffix of each partial hypothesis
+- **ydotool daemon mode** — with ydotoold, keystroke injection is sub-millisecond (no uinput device churn)
 
 ## Service management
 

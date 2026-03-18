@@ -173,8 +173,12 @@ def _init_stt_ws_session(ws, request_id, drain=True):
     ws.send(_make_ws_audio_msg(request_id, _STT_WAV_HEADER), opcode=websocket.ABNF.OPCODE_BINARY)
 
 
-def _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log):
+def _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
+                   raw_partial_holder=None):
     """Parse a WS STT message. Updates phrases/partial_holder in place.
+
+    If raw_partial_holder is provided, also stores the unwindowed full text there
+    (useful for live typing where terminal-width truncation would corrupt diffs).
 
     Returns: 'hypothesis', 'phrase', 'turn_end', or None.
     """
@@ -194,6 +198,8 @@ def _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log):
                     end_word_event.set()
                 full = (" ".join(phrases) + " " + partial).strip() if phrases else partial
                 partial_holder[0] = _window_partial(full)
+                if raw_partial_holder is not None:
+                    raw_partial_holder[0] = full
         except Exception:
             pass
         return "hypothesis"
@@ -211,6 +217,8 @@ def _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log):
                         end_word_event.set()
                     full = " ".join(phrases)
                     partial_holder[0] = _window_partial(full)
+                    if raw_partial_holder is not None:
+                        raw_partial_holder[0] = full
             else:
                 _log(f"phrase status={status}: {body[:150]}")
         except Exception:

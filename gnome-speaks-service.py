@@ -480,6 +480,7 @@ class GnomeSpeaksService:
 
         # Conversation history (cleared when conversation mode toggled off)
         self._conversation_history = []
+        self._conversation_lock = threading.Lock()
 
     # -- State management --------------------------------------------------
 
@@ -488,13 +489,24 @@ class GnomeSpeaksService:
         with self._state_lock:
             return self._state
 
+    _VALID_TRANSITIONS = {
+        "idle": {"listening", "speaking"},
+        "listening": {"processing", "idle"},
+        "speaking": {"idle", "listening"},  # listening: hands-free auto-restart
+        "processing": {"idle", "speaking"},
+    }
+
     def _set_state(self, new_state):
         """Set state and emit StateChanged on the main loop."""
         with self._state_lock:
             if self._state == new_state:
                 return
+            allowed = self._VALID_TRANSITIONS.get(self._state, set())
+            if new_state not in allowed:
+                log.warning("Unexpected transition %s -> %s (forcing)", self._state, new_state)
+            old = self._state
             self._state = new_state
-        log.info("State -> %s", new_state)
+        log.info("State %s -> %s", old, new_state)
         GLib.idle_add(self._emit_state_changed, new_state)
         self._reset_inactivity_timer()
 
@@ -741,12 +753,21 @@ class GnomeSpeaksService:
         typed_partial = [""]  # mutable: text currently live-typed into the text field
         raw_partial = [""]    # unwindowed hypothesis text for live typing diff
 
-        # 4. Sender thread: read audio frames, send to WS with VAD
-        #    Inline calibration: send every frame to Azure immediately (including
-        #    calibration frames) so Azure gets speech ASAP. We only need the
-        #    energy threshold locally for silence detection.
+        # 4. Sender thread: calibrate noise, then send audio with VAD
+        #    Uses calibrate_noise() to buffer calibration frames, then sends
+        #    them to Azure before entering the VAD loop — matching the proven
+        #    pattern from speech-to-cli's stt_streaming().
         def send_audio():
             try:
+                # Calibrate noise threshold (buffers frames without sending)
+                energy_threshold, cal_frames = calibrate_noise(proc)
+                _log(f"calibrated: threshold={energy_threshold:.0f}, cal_frames={len(cal_frames)}")
+
+                # Send buffered calibration frames to Azure
+                for frame in cal_frames:
+                    ws.send(_make_ws_audio_msg(request_id, frame), opcode=websocket.ABNF.OPCODE_BINARY)
+                    raw_frames.append(frame)
+
                 vad = webrtcvad.Vad(state.VAD_AGGRESSIVENESS) if HAS_VAD else None
                 silence_frames = 0
                 speech_frames = 0
@@ -756,18 +777,7 @@ class GnomeSpeaksService:
                 min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)
                 max_frames = int(MAX_LISTEN_SECONDS * 1000 / FRAME_MS)
 
-                # Inline calibration: use cached threshold or calibrate from
-                # the first N frames, but send each frame to Azure as we read it
-                cal_n = state.ENERGY_CALIBRATION_FRAMES
-                if state._cached_noise_threshold is not None and (time.time() - state._cached_noise_time) < state.NOISE_CACHE_TTL:
-                    energy_threshold = state._cached_noise_threshold
-                    cal_n = 0
-                    _log(f"using cached noise threshold={energy_threshold:.0f}")
-                else:
-                    energy_threshold = 0  # calibrated below from first cal_n frames
-                cal_energies = []
-
-                _log(f"limits: max_silence={max_silence} max_no_speech={max_no_speech} min_speech={min_speech} cal_n={cal_n}")
+                _log(f"limits: max_silence={max_silence} max_no_speech={max_no_speech} min_speech={min_speech}")
 
                 while not self._stop_event.is_set():
                     chunk = proc.stdout.read(FRAME_BYTES)
@@ -789,17 +799,6 @@ class GnomeSpeaksService:
                     # Emit audio level for badge visualization
                     if total_frames % 3 == 0:
                         GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
-
-                    # Inline calibration from first N frames
-                    if total_frames <= cal_n:
-                        cal_energies.append(energy)
-                        if total_frames == cal_n:
-                            ambient = sum(cal_energies) / len(cal_energies)
-                            energy_threshold = max(ambient * state.ENERGY_THRESHOLD_MULTIPLIER, 300.0)
-                            state._cached_noise_threshold = energy_threshold
-                            state._cached_noise_time = time.time()
-                            _log(f"calibrated: threshold={energy_threshold:.0f}")
-                        continue  # skip VAD during calibration
 
                     if is_speech_energy(chunk, vad, energy_threshold):
                         speech_frames += 1
@@ -829,8 +828,8 @@ class GnomeSpeaksService:
                 state.unregister_proc(proc)
                 try:
                     ws.send(_make_ws_audio_msg(request_id, b""), opcode=websocket.ABNF.OPCODE_BINARY)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log(f"WS final audio send failed: {exc}")
                 sender_done.set()
 
         sender = threading.Thread(target=send_audio, daemon=True)
@@ -851,11 +850,13 @@ class GnomeSpeaksService:
                     try:
                         ws.settimeout(2.0)
                         msg = ws.recv()
-                    except Exception:
+                    except Exception as exc:
+                        _log(f"WS recv after sender done: {exc}")
                         break
                 else:
                     continue
-            except Exception:
+            except Exception as exc:
+                _log(f"WS recv error: {exc}")
                 break
 
             mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
@@ -876,9 +877,9 @@ class GnomeSpeaksService:
                 if sender_done.is_set():
                     try:
                         ws.settimeout(0.5)
-                        ws.recv()
+                        ws.recv()  # drain final message
                     except Exception:
-                        pass
+                        pass  # expected — no more messages
                     break
             elif mtype == "turn_end":
                 _log(f"turn.end received (phrases={len(phrases)})")
@@ -1008,14 +1009,15 @@ class GnomeSpeaksService:
         if not text or not text.strip():
             return False
 
+        # Stop outside lock to prevent deadlock (stop() acquires multiple locks)
+        if self.current_state not in ("idle",):
+            self.stop()
+
+        if not CONFIG.get("key"):
+            GLib.idle_add(self._emit_error, "Azure Speech key not configured")
+            return False
+
         with self._speak_lock:
-            if self.current_state not in ("idle",):
-                self.stop()
-
-            if not CONFIG.get("key"):
-                GLib.idle_add(self._emit_error, "Azure Speech key not configured")
-                return False
-
             self._set_state("speaking")
             self._speak_thread = threading.Thread(
                 target=self._speak_worker,
@@ -1042,9 +1044,10 @@ class GnomeSpeaksService:
             GLib.idle_add(self._emit_error, f"Speak failed: {exc}")
         finally:
             # Only transition to idle if we're still in speaking state.
-            # Don't wrap _set_state in _state_lock — _set_state acquires it
-            # internally, and Lock is not reentrant (would deadlock).
-            if self._state == "speaking":
+            # Read state under lock, then call _set_state outside (it acquires its own lock).
+            with self._state_lock:
+                still_speaking = self._state == "speaking"
+            if still_speaking:
                 self._set_state("idle")
             _schedule_warmup()
 
@@ -1153,7 +1156,8 @@ class GnomeSpeaksService:
         CONFIG["conversation_mode"] = not current
         if current:
             # Turning off — clear conversation history
-            self._conversation_history.clear()
+            with self._conversation_lock:
+                self._conversation_history.clear()
         log.info("Conversation mode: %s", not current)
         return not current
 
@@ -1180,7 +1184,8 @@ class GnomeSpeaksService:
         if conv and cont:
             CONFIG["conversation_mode"] = False
             CONFIG["continuous_dictation"] = False
-            self._conversation_history.clear()
+            with self._conversation_lock:
+                self._conversation_history.clear()
             log.info("Hands-free mode: off")
             return False
         else:
@@ -1338,7 +1343,8 @@ class GnomeSpeaksService:
         system_prompt = "\n".join(parts)
 
         # Trim history to last 20 exchanges (40 messages)
-        history = self._conversation_history[-40:]
+        with self._conversation_lock:
+            history = list(self._conversation_history[-40:])
         return system_prompt, history
 
     def _parse_type_tags(self, reply):
@@ -1396,7 +1402,8 @@ class GnomeSpeaksService:
                     timeout=30,
                 )
                 resp.raise_for_status()
-                reply = resp.json()["content"][0]["text"]
+                data = resp.json()
+                reply = data.get("content", [{}])[0].get("text", "") if data.get("content") else ""
             elif provider == "openai":
                 if not api_key:
                     GLib.idle_add(self._emit_error, "No OpenAI API key configured")
@@ -1415,7 +1422,8 @@ class GnomeSpeaksService:
                     timeout=30,
                 )
                 resp.raise_for_status()
-                reply = resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                reply = data.get("choices", [{}])[0].get("message", {}).get("content", "") if data.get("choices") else ""
             elif provider == "azure":
                 cca_config = self._load_cca_config()
                 azure_key = cca_config.get("api_key", "")
@@ -1447,7 +1455,8 @@ class GnomeSpeaksService:
                     json=body, timeout=30,
                 )
                 resp.raise_for_status()
-                reply = resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                reply = data.get("choices", [{}])[0].get("message", {}).get("content", "") if data.get("choices") else ""
             elif provider == "google":
                 cca_config = self._load_cca_config()
                 google_key = cca_config.get("google_api_key", "")
@@ -1481,8 +1490,9 @@ class GnomeSpeaksService:
 
             if reply:
                 # Track conversation history
-                self._conversation_history.append({"role": "user", "content": user_text})
-                self._conversation_history.append({"role": "assistant", "content": reply})
+                with self._conversation_lock:
+                    self._conversation_history.append({"role": "user", "content": user_text})
+                    self._conversation_history.append({"role": "assistant", "content": reply})
                 # Parse <type>...</type> tags — type that text at cursor, speak the rest
                 type_text, speak_text = self._parse_type_tags(reply)
                 if type_text:
@@ -1614,14 +1624,14 @@ class GnomeSpeaksService:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
+        data = resp.json()
+        return data.get("content", [{}])[0].get("text", "") if data.get("content") else None
 
     # -- Stop --------------------------------------------------------------
 
     def stop(self):
         """Stop any current operation and return to idle."""
-        current = self.current_state
-        log.info("Stop requested (current state: %s)", current)
+        log.info("Stop requested (current state: %s)", self.current_state)
 
         # Signal our stop event for the STT sender loop
         self._stop_event.set()
@@ -1631,15 +1641,33 @@ class GnomeSpeaksService:
 
         # Wait for threads to finish with short timeouts
         # Skip joining the current thread (e.g. conversation mode calls speak() from STT thread)
-        current = threading.current_thread()
-        if self._stt_thread is not None and self._stt_thread is not current:
-            self._stt_thread.join(timeout=3)
+        me = threading.current_thread()
+
+        with self._stt_lock:
+            stt_t = self._stt_thread
+        if stt_t is not None and stt_t is not me:
+            stt_t.join(timeout=3)
+            if stt_t.is_alive():
+                log.warning("STT thread did not finish in 3s")
+        with self._stt_lock:
             self._stt_thread = None
-        if self._speak_thread is not None and self._speak_thread is not current:
-            self._speak_thread.join(timeout=3)
+
+        with self._speak_lock:
+            speak_t = self._speak_thread
+        if speak_t is not None and speak_t is not me:
+            speak_t.join(timeout=3)
+            if speak_t.is_alive():
+                log.warning("Speak thread did not finish in 3s")
+        with self._speak_lock:
             self._speak_thread = None
-        if self._talk_thread is not None and self._talk_thread is not current:
-            self._talk_thread.join(timeout=3)
+
+        with self._talk_lock:
+            talk_t = self._talk_thread
+        if talk_t is not None and talk_t is not me:
+            talk_t.join(timeout=3)
+            if talk_t.is_alive():
+                log.warning("Talk thread did not finish in 3s")
+        with self._talk_lock:
             self._talk_thread = None
 
         self._set_state("idle")

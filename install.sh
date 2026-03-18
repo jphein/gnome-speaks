@@ -116,7 +116,7 @@ echo
 # ---- 1. Verify required source files exist ------------------
 step "Checking source files"
 
-REQUIRED_FILES=("extension.js" "metadata.json" "stylesheet.css" "schemas/org.gnome.shell.extensions.gnome-speaks.gschema.xml" "speech/state.py" "speech/audio.py" "speech/stt.py" "speech/speech_tts.py")
+REQUIRED_FILES=("extension.js" "metadata.json" "stylesheet.css" "schemas/org.gnome.shell.extensions.gnome-speaks.gschema.xml")
 MISSING=0
 for f in "${REQUIRED_FILES[@]}"; do
     if [[ ! -f "$PROJECT_DIR/$f" ]]; then

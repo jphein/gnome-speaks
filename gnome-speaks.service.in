@@ -12,6 +12,8 @@ Restart=on-failure
 RestartSec=2
 TimeoutStopSec=10
 PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR PULSE_SERVER
+Environment=SPEECH_ENGINE_PATH=%h/Projects/speech-to-cli
+Environment=CLOUD_CHAT_PATH=%h/Projects/cloud-chat-assistant
 
 [Install]
 WantedBy=graphical-session.target

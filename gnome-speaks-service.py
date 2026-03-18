@@ -14,7 +14,7 @@ Bus name:    org.gnome.Speaks
 Object path: /org/gnome/Speaks
 Interface:   org.gnome.Speaks
 
-Uses vendored speech modules (speech/) for all audio optimizations:
+Uses speech-to-cli modules for all audio optimizations:
 prewarmed recorder, persistent WebSocket, noise calibration caching,
 HTTP session pooling, VAD, energy-gated silence detection.
 """
@@ -37,15 +37,22 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib
 
 # ---------------------------------------------------------------------------
-# Import speech modules: prefer live speech-to-cli (dev), fall back to vendored speech/
+# Import speech modules from speech-to-cli
 # ---------------------------------------------------------------------------
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_LIVE_PATH = os.path.expanduser("~/Projects/speech-to-cli")
-if os.path.isdir(_LIVE_PATH):
-    sys.path.insert(0, _LIVE_PATH)
-else:
-    sys.path.insert(0, os.path.join(_SCRIPT_DIR, "speech"))
+_SPEECH_ENGINE = os.environ.get("SPEECH_ENGINE_PATH", os.path.expanduser("~/Projects/speech-to-cli"))
+if not os.path.isdir(_SPEECH_ENGINE):
+    print(f"Error: speech-to-cli not found at {_SPEECH_ENGINE}", file=sys.stderr)
+    print("Set SPEECH_ENGINE_PATH or clone https://github.com/jphein/speech-to-cli", file=sys.stderr)
+    sys.exit(1)
+sys.path.insert(0, _SPEECH_ENGINE)
+
+# ---------------------------------------------------------------------------
+# Import cloud-chat-assistant path for LLM providers
+# ---------------------------------------------------------------------------
+
+_CCA_PATH = os.environ.get("CLOUD_CHAT_PATH", os.path.expanduser("~/Projects/cloud-chat-assistant"))
 
 import state  # noqa: E402
 from state import CONFIG, HAS_VAD, HAS_WS, HAS_WHISPER, FRAME_BYTES, FRAME_MS, SAMPLE_RATE  # noqa: E402
@@ -1549,12 +1556,11 @@ class GnomeSpeaksService:
 
     def _call_cloud_chat_assistant(self, messages, model):
         """Call cloud-chat-assistant's call_llm with a pre-built messages list."""
-        cca_path = os.path.expanduser("~/Projects/cloud-chat-assistant")
-        if os.path.isdir(cca_path):
+        if os.path.isdir(_CCA_PATH):
             try:
                 import asyncio
-                if cca_path not in sys.path:
-                    sys.path.insert(0, cca_path)
+                if _CCA_PATH not in sys.path:
+                    sys.path.insert(0, _CCA_PATH)
                 import mcp_cloud_chat as cca
                 cca_config = self._load_cca_config()
                 for k, v in cca_config.items():
@@ -1856,10 +1862,9 @@ def main():
         )
         # Continue anyway — we will emit Error signals on method calls
 
-    _speech_src = _LIVE_PATH if os.path.isdir(_LIVE_PATH) else os.path.join(_SCRIPT_DIR, "speech")
     log.info(
         "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s, whisper=%s)",
-        _speech_src, CONFIG.get("region"), HAS_VAD, HAS_WS, HAS_WHISPER,
+        _SPEECH_ENGINE, CONFIG.get("region"), HAS_VAD, HAS_WS, HAS_WHISPER,
     )
 
     _detect_typing_tool()

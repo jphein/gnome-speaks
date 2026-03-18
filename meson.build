@@ -36,21 +36,11 @@ gnome.post_install(
 service_dir = join_paths(prefix, 'lib', 'systemd', 'user')
 dbus_service_dir = join_paths(datadir, 'dbus-1', 'services')
 
-# Python service and vendored speech modules
+# Python service
 install_data(
   'gnome-speaks-service.py',
   install_dir: join_paths(datadir, 'gnome-speaks'),
   install_mode: 'rwxr-xr-x',
-)
-
-install_data(
-  [
-    'speech/state.py',
-    'speech/audio.py',
-    'speech/stt.py',
-    'speech/speech_tts.py',
-  ],
-  install_dir: join_paths(datadir, 'gnome-speaks', 'speech'),
 )
 
 # Configure and install systemd service

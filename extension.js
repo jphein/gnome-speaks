@@ -60,6 +60,32 @@ const DBUS_XML = `
     <method name="GetVoiceQuality">
       <arg direction="out" type="s" name="quality"/>
     </method>
+    <method name="Talk">
+      <arg direction="in" type="s" name="text"/>
+      <arg direction="out" type="s" name="reply"/>
+    </method>
+    <method name="ToggleBargeIn">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetBargeIn">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="ToggleHandsFree">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetAudioInfo">
+      <arg direction="out" type="s" name="info"/>
+    </method>
+    <method name="SetSTTMode">
+      <arg direction="in" type="s" name="mode"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="GetSTTMode">
+      <arg direction="out" type="s" name="mode"/>
+    </method>
+    <method name="GetSTTModes">
+      <arg direction="out" type="s" name="modes"/>
+    </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
     </method>
@@ -472,6 +498,21 @@ export default class GnomeSpeaksExtension extends Extension {
         });
     }
 
+    _updateAudioInfoMenu(info) {
+        if (!this._menuAudioInfoItem)
+            return;
+        let icon = info.device_type === 'headphones' ? '\u{1F3A7}' : '\u{1F50A}';
+        let type = info.device_type === 'headphones' ? 'Headphones'
+            : info.device_type === 'speakers' ? 'Speakers' : 'Unknown';
+        let desc = info.description || '';
+        let duplex = info.half_duplex ? 'half-duplex' : 'full-duplex';
+        let ec = info.echo_cancel ? ', EC' : '';
+        let label = `${icon} ${type}: ${duplex}${ec}`;
+        if (desc)
+            label = `${icon} ${desc} (${duplex}${ec})`;
+        this._menuAudioInfoItem.label.text = label;
+    }
+
     _updateModePill() {
         if (!this._modePill) return;
         let isChat = this._conversationMode;
@@ -598,6 +639,11 @@ export default class GnomeSpeaksExtension extends Extension {
         this._menuVoiceQualityItem.connect('activate', () => this._toggleVoiceQuality());
         menu.addMenuItem(this._menuVoiceQualityItem);
 
+        // ── Audio Device info (read-only) ──
+        this._menuAudioInfoItem = new PopupMenu.PopupMenuItem('Audio: detecting...');
+        this._menuAudioInfoItem.setSensitive(false);
+        menu.addMenuItem(this._menuAudioInfoItem);
+
         // ── Language submenu ──
         this._langSubMenu = new PopupMenu.PopupSubMenuMenuItem('Language: en-US');
         let languages = ['en-US', 'en-GB', 'en-AU', 'de-DE', 'fr-FR', 'es-ES', 'it-IT', 'ja-JP', 'ko-KR', 'zh-CN', 'pt-BR', 'ru-RU', 'ar-SA', 'hi-IN', 'nl-NL'];
@@ -680,6 +726,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._menuContinuousToggle = null;
             this._menuConversationToggle = null;
             this._menuVoiceQualityItem = null;
+            this._menuAudioInfoItem = null;
             this._langSubMenu = null;
         }
     }
@@ -822,6 +869,18 @@ export default class GnomeSpeaksExtension extends Extension {
                 if (this._menuVoiceQualityItem)
                     this._menuVoiceQualityItem.label.text = result[0] === 'hd'
                         ? 'Voice: HD' : 'Voice: Fast';
+            }
+        });
+
+        // Sync audio device info
+        this._proxy.GetAudioInfoRemote((result, error) => {
+            if (!error && result && result[0]) {
+                try {
+                    let info = JSON.parse(result[0]);
+                    this._updateAudioInfoMenu(info);
+                } catch (e) {
+                    // Ignore parse errors
+                }
             }
         });
 

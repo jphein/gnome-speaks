@@ -48,13 +48,15 @@ else:
     sys.path.insert(0, os.path.join(_SCRIPT_DIR, "speech"))
 
 import state  # noqa: E402
-from state import CONFIG, HAS_VAD, HAS_WS, FRAME_BYTES, FRAME_MS, SAMPLE_RATE  # noqa: E402
+from state import CONFIG, HAS_VAD, HAS_WS, HAS_WHISPER, FRAME_BYTES, FRAME_MS, SAMPLE_RATE  # noqa: E402
 from audio import (  # noqa: E402
     _take_prewarmed_rec, _build_rec_cmd, calibrate_noise,
     is_speech_energy, rms_energy, _schedule_warmup, _prewarm_recorder,
     _discard_prewarmed_rec,
+    detect_audio_output, has_echo_cancel, _refresh_audio_detection,
 )
 from stt import (  # noqa: E402
+    stt as stt_dispatch,
     _get_stt_ws, _invalidate_stt_ws, _init_stt_ws_session,
     _make_ws_audio_msg, _parse_ws_msg, _rest_stt_fallback,
     _check_end_word, _strip_end_word,
@@ -131,6 +133,32 @@ INTROSPECTION_XML = """
     </method>
     <method name="GetVoiceQuality">
       <arg direction="out" type="s" name="quality"/>
+    </method>
+    <method name="ToggleBargeIn">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetBargeIn">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="ToggleHandsFree">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="Talk">
+      <arg direction="in" type="s" name="text"/>
+      <arg direction="out" type="s" name="reply"/>
+    </method>
+    <method name="GetAudioInfo">
+      <arg direction="out" type="s" name="info"/>
+    </method>
+    <method name="SetSTTMode">
+      <arg direction="in" type="s" name="mode"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
+    <method name="GetSTTMode">
+      <arg direction="out" type="s" name="mode"/>
+    </method>
+    <method name="GetSTTModes">
+      <arg direction="out" type="s" name="modes"/>
     </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
@@ -424,6 +452,13 @@ class GnomeSpeaksService:
         self._speak_thread = None
         self._speak_lock = threading.Lock()
 
+        # Talk (full-duplex TTS+STT) state
+        self._talk_thread = None
+        self._talk_lock = threading.Lock()
+
+        # STT mode selection (auto, streaming, whisper, vad, fixed)
+        self._stt_mode = "auto"
+
         # Inactivity timer
         self._inactivity_source_id = None
         self._main_loop = None
@@ -522,10 +557,42 @@ class GnomeSpeaksService:
     # -- STT: Streaming WebSocket using speech-to-cli building blocks ------
 
     def start_listening(self):
-        """Start microphone recording with streaming STT. Returns 'ok' or error string."""
+        """Start microphone recording with STT. Returns 'ok' or error string."""
+        _refresh_audio_detection()
         if self.current_state != "idle":
             return f"error: busy ({self.current_state})"
 
+        # Determine effective mode
+        mode = self._stt_mode
+        if mode == "auto":
+            if HAS_WS and HAS_VAD:
+                mode = "streaming"
+            elif HAS_VAD:
+                mode = "vad"
+            else:
+                mode = "fixed"
+
+        # Use non-streaming STT backends (whisper, vad, fixed)
+        if mode in ("whisper", "vad", "fixed"):
+            if mode == "whisper" and not HAS_WHISPER:
+                GLib.idle_add(self._emit_error, "faster-whisper not installed")
+                return "error: no whisper support"
+            if mode != "whisper" and not CONFIG.get("key"):
+                GLib.idle_add(self._emit_error, "Azure Speech key not configured")
+                return "error: no API key"
+
+            self._stop_event.clear()
+            self._set_state("listening")
+
+            self._stt_thread = threading.Thread(
+                target=self._batch_stt_worker,
+                args=(mode,),
+                daemon=True,
+            )
+            self._stt_thread.start()
+            return "ok"
+
+        # Streaming mode (default)
         if not CONFIG.get("key"):
             GLib.idle_add(self._emit_error, "Azure Speech key not configured")
             return "error: no API key"
@@ -543,6 +610,52 @@ class GnomeSpeaksService:
         )
         self._stt_thread.start()
         return "ok"
+
+    def _batch_stt_worker(self, mode):
+        """Background thread: batch STT using stt() dispatcher (whisper, vad, fixed)."""
+        try:
+            state._cancel_event.clear()
+            result = stt_dispatch(mode=mode)
+
+            if result.get("cancelled"):
+                log.info("STT cancelled")
+                GLib.idle_add(self._emit_transcription_ready, "")
+                self._set_state("idle")
+                _schedule_warmup()
+                return
+
+            user_text = result.get("text", "")
+
+            self._set_state("processing")
+            if user_text:
+                user_text = apply_voice_commands(user_text)
+                user_text = apply_auto_corrections(user_text)
+                GLib.idle_add(self._emit_transcription_ready, user_text)
+                log.info("Transcription (%s): %s", mode, user_text[:100])
+
+                if CONFIG.get("conversation_mode", False):
+                    self._conversation_worker(user_text)
+                    _schedule_warmup()
+                    return
+
+                if CONFIG.get("dictation_mode", True):
+                    type_at_cursor(user_text)
+                else:
+                    clipboard_write(user_text)
+            else:
+                log.info("No speech detected (%s)", mode)
+                GLib.idle_add(self._emit_transcription_ready, "")
+
+            self._set_state("idle")
+            _schedule_warmup()
+
+            if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
+                GLib.idle_add(lambda: self.start_listening() or False)
+        except Exception as exc:
+            log.exception("Batch STT (%s) failed: %s", mode, exc)
+            GLib.idle_add(self._emit_error, f"STT failed: {exc}")
+            self._set_state("idle")
+            _schedule_warmup()
 
     def _streaming_stt_worker(self):
         """Background thread: streaming STT using speech-to-cli building blocks."""
@@ -879,6 +992,7 @@ class GnomeSpeaksService:
 
     def speak(self, text):
         """Synthesize and play text via speech_tts.tts(). Returns True on success."""
+        _refresh_audio_detection()
         if not text or not text.strip():
             return False
 
@@ -917,6 +1031,14 @@ class GnomeSpeaksService:
                 self._set_state("idle")
             _schedule_warmup()
 
+            # Hands-free loop: after TTS finishes in conversation mode,
+            # automatically restart listening if continuous_dictation is enabled
+            if (CONFIG.get("continuous_dictation", False)
+                    and CONFIG.get("conversation_mode", False)
+                    and not self._stop_event.is_set()):
+                log.info("Hands-free: auto-restarting listening after TTS")
+                GLib.idle_add(lambda: self.start_listening() or False)
+
     def speak_clipboard(self):
         """Read clipboard and speak its contents."""
         text = clipboard_read()
@@ -932,6 +1054,71 @@ class GnomeSpeaksService:
             GLib.idle_add(self._emit_error, "No text selected")
             return False
         return self.speak(text)
+
+    # -- Talk (full-duplex TTS+STT) ----------------------------------------
+
+    def talk(self, text):
+        """Speak text and listen for user reply via full-duplex TTS+STT.
+
+        Returns the user's spoken reply text, or an error string prefixed
+        with 'error:'.
+        """
+        if not text or not text.strip():
+            return "error: no text provided"
+
+        with self._talk_lock:
+            if self.current_state not in ("idle",):
+                self.stop()
+
+            if not CONFIG.get("key"):
+                GLib.idle_add(self._emit_error, "Azure Speech key not configured")
+                return "error: no API key"
+
+            self._stop_event.clear()
+            self._set_state("speaking")
+
+            # Use an event to pass the result back from the worker thread
+            result_holder = {"reply": ""}
+            done_event = threading.Event()
+
+            self._talk_thread = threading.Thread(
+                target=self._talk_worker,
+                args=(text.strip(), result_holder, done_event),
+                daemon=True,
+            )
+            self._talk_thread.start()
+
+            # Wait for the worker to complete (blocks the D-Bus call)
+            done_event.wait()
+            return result_holder["reply"]
+
+    def _talk_worker(self, text, result_holder, done_event):
+        """Background thread: full-duplex TTS+STT via speech_tts.talk_fullduplex()."""
+        try:
+            state._cancel_event.clear()
+
+            result = speech_tts.talk_fullduplex(
+                text, quality=self._voice_quality,
+            )
+
+            if result.get("error"):
+                GLib.idle_add(self._emit_error, result["error"])
+                result_holder["reply"] = f"error: {result['error']}"
+            elif result.get("cancelled"):
+                result_holder["reply"] = ""
+            else:
+                user_reply = result.get("text", "")
+                result_holder["reply"] = user_reply
+                if user_reply:
+                    GLib.idle_add(self._emit_transcription_ready, user_reply)
+        except Exception as exc:
+            log.exception("Talk failed: %s", exc)
+            GLib.idle_add(self._emit_error, f"Talk failed: {exc}")
+            result_holder["reply"] = f"error: {exc}"
+        finally:
+            self._set_state("idle")
+            _schedule_warmup()
+            done_event.set()
 
     def set_language(self, language):
         """Change the STT language at runtime."""
@@ -954,6 +1141,31 @@ class GnomeSpeaksService:
         CONFIG["continuous_dictation"] = not current
         log.info("Continuous dictation: %s", not current)
         return not current
+
+    def toggle_barge_in(self):
+        current = CONFIG.get("enable_barge_in", False)
+        CONFIG["enable_barge_in"] = not current
+        log.info("Barge-in: %s", not current)
+        return not current
+
+    def get_barge_in(self):
+        return CONFIG.get("enable_barge_in", False)
+
+    def toggle_hands_free(self):
+        """Toggle hands-free mode: enables both continuous_dictation + conversation_mode together."""
+        # If either is off, turn both on; if both are on, turn both off
+        conv = CONFIG.get("conversation_mode", False)
+        cont = CONFIG.get("continuous_dictation", False)
+        if conv and cont:
+            CONFIG["conversation_mode"] = False
+            CONFIG["continuous_dictation"] = False
+            log.info("Hands-free mode: off")
+            return False
+        else:
+            CONFIG["conversation_mode"] = True
+            CONFIG["continuous_dictation"] = True
+            log.info("Hands-free mode: on")
+            return True
 
     def toggle_voice_quality(self):
         """Toggle between HD (DragonHD, eastus) and Fast (Neural, westus) voice modes.
@@ -979,6 +1191,45 @@ class GnomeSpeaksService:
 
     def get_voice_quality(self):
         return self._voice_quality
+
+    def get_audio_info(self):
+        """Return JSON string with detected audio device and echo cancellation info."""
+        import json as _json
+        _refresh_audio_detection()
+        dev_type = CONFIG.get("_detected_output", "unknown")
+        dev_info = CONFIG.get("_detected_output_info", {})
+        ec = has_echo_cancel()
+        return _json.dumps({
+            "device_type": dev_type,
+            "echo_cancel": ec,
+            "half_duplex": CONFIG.get("half_duplex", False),
+            "description": dev_info.get("description", ""),
+        })
+
+    def set_stt_mode(self, mode):
+        """Set the STT mode. Valid: auto, streaming, whisper, vad, fixed."""
+        valid = ("auto", "streaming", "whisper", "vad", "fixed")
+        if mode not in valid:
+            log.warning("Invalid STT mode: %s (valid: %s)", mode, ", ".join(valid))
+            return False
+        self._stt_mode = mode
+        log.info("STT mode set to: %s", mode)
+        return True
+
+    def get_stt_mode(self):
+        return self._stt_mode
+
+    def get_stt_modes(self):
+        """Return comma-separated list of available STT modes."""
+        modes = ["auto"]
+        if HAS_WS and HAS_VAD:
+            modes.append("streaming")
+        if HAS_WHISPER:
+            modes.append("whisper")
+        if HAS_VAD:
+            modes.append("vad")
+        modes.append("fixed")
+        return ",".join(modes)
 
     # -- Conversation mode (voice -> LLM -> TTS) --------------------------
 
@@ -1132,7 +1383,7 @@ class GnomeSpeaksService:
             return {}
 
     def _call_cloud_chat_assistant(self, user_text, model, system_prompt):
-        """Call cloud-chat-assistant's chat function directly if available."""
+        """Call cloud-chat-assistant's call_llm function directly if available."""
         cca_path = os.path.expanduser("~/Projects/cloud-chat-assistant")
         if os.path.isdir(cca_path):
             try:
@@ -1147,6 +1398,7 @@ class GnomeSpeaksService:
                 # Set the model
                 cca.CONFIG["deployment"] = model
                 cca.CONFIG["model"] = model
+                cca.CONFIG["model_type"] = cca_config.get("model_type", "bedrock")
                 # Build messages
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -1157,10 +1409,14 @@ class GnomeSpeaksService:
                 try:
                     import httpx
                     async def _do_chat():
-                        async with httpx.AsyncClient(timeout=30) as client:
-                            return await cca.call_model(client, messages, None, model)
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            response, usage, latency = await cca.call_llm(client, messages, None, model)
+                            return response
                     result = loop.run_until_complete(_do_chat())
-                    return result.get("content", "") if isinstance(result, dict) else str(result)
+                    if result and not result.startswith("Error"):
+                        return result
+                    log.warning("cloud-chat-assistant returned: %s", result[:200] if result else "empty")
+                    return None
                 finally:
                     loop.close()
             except Exception as exc:
@@ -1209,6 +1465,9 @@ class GnomeSpeaksService:
         if self._speak_thread is not None:
             self._speak_thread.join(timeout=3)
             self._speak_thread = None
+        if self._talk_thread is not None:
+            self._talk_thread.join(timeout=3)
+            self._talk_thread = None
 
         self._set_state("idle")
         return True
@@ -1283,6 +1542,17 @@ class DBusHandler:
                     )
                 threading.Thread(target=_do_speak_sel, daemon=True).start()
 
+            elif method_name == "Talk":
+                text = parameters.unpack()[0]
+                def _do_talk():
+                    result = self.service.talk(text)
+                    GLib.idle_add(
+                        lambda: invocation.return_value(
+                            GLib.Variant("(s)", (result,))
+                        ) or False
+                    )
+                threading.Thread(target=_do_talk, daemon=True).start()
+
             elif method_name == "SetLanguage":
                 lang = parameters.unpack()[0]
                 result = self.service.set_language(lang)
@@ -1306,6 +1576,35 @@ class DBusHandler:
 
             elif method_name == "GetVoiceQuality":
                 result = self.service.get_voice_quality()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "ToggleBargeIn":
+                result = self.service.toggle_barge_in()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetBargeIn":
+                result = self.service.get_barge_in()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "ToggleHandsFree":
+                result = self.service.toggle_hands_free()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetAudioInfo":
+                result = self.service.get_audio_info()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "SetSTTMode":
+                mode = parameters.unpack()[0]
+                result = self.service.set_stt_mode(mode)
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetSTTMode":
+                result = self.service.get_stt_mode()
+                invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "GetSTTModes":
+                result = self.service.get_stt_modes()
                 invocation.return_value(GLib.Variant("(s)", (result,)))
 
             elif method_name == "Stop":
@@ -1392,11 +1691,21 @@ def main():
 
     _speech_src = _LIVE_PATH if os.path.isdir(_LIVE_PATH) else os.path.join(_SCRIPT_DIR, "speech")
     log.info(
-        "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s)",
-        _speech_src, CONFIG.get("region"), HAS_VAD, HAS_WS,
+        "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s, whisper=%s)",
+        _speech_src, CONFIG.get("region"), HAS_VAD, HAS_WS, HAS_WHISPER,
     )
 
     _detect_typing_tool()
+
+    # Detect audio output device and auto-enable echo cancellation
+    _refresh_audio_detection()
+    dev_type = CONFIG.get("_detected_output", "unknown")
+    ec_present = has_echo_cancel()
+    if ec_present and dev_type == "headphones":
+        CONFIG["enable_echo_cancel"] = True
+        log.info("Auto-enabled echo cancellation (headphones + PipeWire EC detected)")
+    log.info("Audio output: %s, echo_cancel=%s, half_duplex=%s",
+             dev_type, ec_present, CONFIG.get("half_duplex", False))
 
     # Prewarm recorder, WebSocket, and HTTP session so first call is instant
     _prewarm_recorder()

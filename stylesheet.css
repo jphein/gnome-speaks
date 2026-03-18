@@ -1,0 +1,208 @@
+/* GNOME Speaks - Floating Voice Badge & Panel Indicator
+ * A polished, glassmorphism-inspired UI for voice interaction.
+ */
+
+/* ============================================================
+ * BASE BADGE
+ * ============================================================ */
+
+.gnome-speaks-badge {
+    border-radius: 28px;
+    padding: 8px 12px;
+    min-height: 32px;
+    background-color: rgba(30, 30, 30, 0.75);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4),
+                0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: all 350ms ease-in-out;
+    color: rgba(255, 255, 255, 0.95);
+    font-weight: bold;
+    font-size: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.gnome-speaks-badge StIcon {
+    icon-size: 20px;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.gnome-speaks-badge StLabel {
+    margin-left: 8px;
+    color: rgba(255, 255, 255, 0.95);
+}
+
+/* ============================================================
+ * HOVER
+ * ============================================================ */
+
+.gnome-speaks-badge:hover {
+    background-color: rgba(50, 50, 55, 0.82);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5),
+                0 2px 6px rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* ============================================================
+ * STATE: IDLE
+ * Compact circle, quiet and unobtrusive
+ * ============================================================ */
+
+.gnome-speaks-idle {
+    background-color: rgba(40, 40, 46, 0.7);
+    min-width: 48px;
+    min-height: 48px;
+    padding: 0;
+    text-align: center;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3),
+                0 1px 2px rgba(0, 0, 0, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.gnome-speaks-idle StIcon {
+    icon-size: 22px;
+    color: rgba(255, 255, 255, 0.6);
+    margin: 0;
+    padding: 0;
+}
+
+.gnome-speaks-idle:hover {
+    background-color: rgba(55, 55, 62, 0.78);
+    box-shadow: 0 3px 16px rgba(0, 0, 0, 0.35);
+}
+
+.gnome-speaks-idle:hover StIcon {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+/* ============================================================
+ * STATE: LISTENING
+ * Vibrant blue with radiating glow
+ * ============================================================ */
+
+.gnome-speaks-listening {
+    background-color: rgba(30, 110, 230, 0.88);
+    padding: 8px 18px;
+    box-shadow: 0 0 20px rgba(30, 130, 255, 0.5),
+                0 4px 16px rgba(0, 0, 0, 0.3),
+                0 0 40px rgba(50, 140, 255, 0.15);
+    border: 1px solid rgba(120, 180, 255, 0.25);
+}
+
+.gnome-speaks-listening StIcon {
+    color: white;
+}
+
+.gnome-speaks-listening StLabel {
+    color: white;
+}
+
+.gnome-speaks-listening:hover {
+    background-color: rgba(40, 120, 240, 0.92);
+    box-shadow: 0 0 28px rgba(30, 130, 255, 0.6),
+                0 6px 20px rgba(0, 0, 0, 0.35),
+                0 0 48px rgba(50, 140, 255, 0.2);
+}
+
+/* ============================================================
+ * STATE: PROCESSING
+ * Warm amber, indicates thinking
+ * ============================================================ */
+
+.gnome-speaks-processing {
+    background-color: rgba(210, 160, 30, 0.88);
+    padding: 8px 18px;
+    box-shadow: 0 0 16px rgba(230, 180, 40, 0.4),
+                0 4px 16px rgba(0, 0, 0, 0.3),
+                0 0 32px rgba(240, 190, 50, 0.12);
+    border: 1px solid rgba(255, 210, 80, 0.25);
+}
+
+.gnome-speaks-processing StIcon {
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.gnome-speaks-processing StLabel {
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.gnome-speaks-processing:hover {
+    background-color: rgba(220, 170, 40, 0.92);
+    box-shadow: 0 0 22px rgba(230, 180, 40, 0.5),
+                0 6px 20px rgba(0, 0, 0, 0.35),
+                0 0 40px rgba(240, 190, 50, 0.18);
+}
+
+/* ============================================================
+ * STATE: SPEAKING
+ * Rich purple with vibrant glow
+ * ============================================================ */
+
+.gnome-speaks-speaking {
+    background-color: rgba(140, 60, 220, 0.88);
+    padding: 8px 18px;
+    box-shadow: 0 0 20px rgba(160, 80, 255, 0.5),
+                0 4px 16px rgba(0, 0, 0, 0.3),
+                0 0 40px rgba(170, 90, 255, 0.15);
+    border: 1px solid rgba(190, 130, 255, 0.25);
+}
+
+.gnome-speaks-speaking StIcon {
+    color: white;
+}
+
+.gnome-speaks-speaking StLabel {
+    color: white;
+}
+
+.gnome-speaks-speaking:hover {
+    background-color: rgba(150, 70, 230, 0.92);
+    box-shadow: 0 0 28px rgba(160, 80, 255, 0.6),
+                0 6px 20px rgba(0, 0, 0, 0.35),
+                0 0 48px rgba(170, 90, 255, 0.2);
+}
+
+/* ============================================================
+ * STATE: ERROR
+ * Red flash to signal problems
+ * ============================================================ */
+
+.gnome-speaks-error {
+    background-color: rgba(220, 50, 50, 0.88);
+    box-shadow: 0 0 16px rgba(255, 60, 60, 0.4),
+                0 4px 16px rgba(0, 0, 0, 0.3),
+                0 0 32px rgba(255, 70, 70, 0.12);
+    border: 1px solid rgba(255, 120, 120, 0.25);
+}
+
+.gnome-speaks-error StIcon {
+    color: white;
+}
+
+.gnome-speaks-error StLabel {
+    color: white;
+}
+
+.gnome-speaks-error:hover {
+    background-color: rgba(230, 60, 60, 0.92);
+    box-shadow: 0 0 22px rgba(255, 60, 60, 0.5),
+                0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+/* ============================================================
+ * PANEL INDICATOR
+ * ============================================================ */
+
+.gnome-speaks-panel-idle {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.gnome-speaks-panel-listening {
+    color: rgba(100, 180, 255, 1.0);
+}
+
+.gnome-speaks-panel-processing {
+    color: rgba(255, 180, 50, 1.0);
+}
+
+.gnome-speaks-panel-speaking {
+    color: rgba(180, 120, 255, 1.0);
+}

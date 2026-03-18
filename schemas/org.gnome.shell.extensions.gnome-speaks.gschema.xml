@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="gnome-speaks">
+
+  <schema id="org.gnome.shell.extensions.gnome-speaks"
+          path="/org/gnome/shell/extensions/gnome-speaks/">
+
+    <key name="badge-position-x" type="i">
+      <default>-1</default>
+      <summary>Badge X position</summary>
+      <description>
+        Horizontal position of the floating badge in pixels from the left edge.
+        A value of -1 means auto-center on the screen.
+      </description>
+    </key>
+
+    <key name="badge-position-y" type="i">
+      <default>-1</default>
+      <summary>Badge Y position</summary>
+      <description>
+        Vertical position of the floating badge in pixels from the top edge.
+        A value of -1 means auto-position at the bottom of the screen.
+      </description>
+    </key>
+
+    <key name="show-badge" type="b">
+      <default>true</default>
+      <summary>Show floating badge</summary>
+      <description>
+        Whether to display the floating voice-status badge on the desktop.
+      </description>
+    </key>
+
+    <key name="show-panel-indicator" type="b">
+      <default>true</default>
+      <summary>Show panel indicator</summary>
+      <description>
+        Whether to display the GNOME Speaks indicator in the top panel.
+      </description>
+    </key>
+
+    <key name="auto-stop-silence-seconds" type="i">
+      <default>3</default>
+      <range min="1" max="10"/>
+      <summary>Auto-stop after silence (seconds)</summary>
+      <description>
+        Number of seconds of silence before the microphone automatically
+        stops listening. Must be between 1 and 10.
+      </description>
+    </key>
+
+  </schema>
+
+</schemalist>

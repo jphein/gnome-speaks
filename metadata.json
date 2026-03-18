@@ -1,0 +1,8 @@
+{
+    "uuid": "gnome-speaks@jphein",
+    "name": "GNOME Speaks",
+    "description": "Beautiful floating TTS/STT badge powered by Azure Speech Services",
+    "shell-version": ["46"],
+    "version": 1,
+    "url": "https://github.com/jphein/gnome-speaks"
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=GNOME Speaks - Shared Speech Service (TTS/STT via Azure)
+Documentation=https://github.com/jphein/gnome-speaks
+# Start after the graphical session is ready (audio devices available)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.gnome.Speaks
+ExecStart=/home/jp/Projects/gnome-speaks/gnome-speaks-service.py
+# Restart on failure but not on clean exit (inactivity timeout)
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+# Import session environment for PipeWire, Wayland, and clipboard access
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR PULSE_SERVER
+
+[Install]
+WantedBy=graphical-session.target

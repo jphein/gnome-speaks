@@ -4,3 +4,5 @@ __pycache__/
 schemas/gschemas.compiled
 .claude/
 speech/chime_*.wav
+build/
+builddir/

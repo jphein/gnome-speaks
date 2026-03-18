@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# GNOME Speaks — TTS/STT floating badge for GNOME Shell
+# Copyright (C) 2025 JP Hein
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 """
 GNOME Speaks — Session DBus service providing TTS and STT via Azure Speech Services.
 

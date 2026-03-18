@@ -1,0 +1,17 @@
+[Unit]
+Description=GNOME Speaks - Shared Speech Service (TTS/STT via Azure)
+Documentation=https://github.com/jphein/gnome-speaks
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.gnome.Speaks
+ExecStart=@SERVICE_EXEC@
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR PULSE_SERVER
+
+[Install]
+WantedBy=graphical-session.target

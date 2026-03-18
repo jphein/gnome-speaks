@@ -411,14 +411,20 @@ def stt_streaming(max_seconds=30, progress_token=None):
                     break
             elif mtype == "turn_end":
                 _log(f"turn.end received (phrases={len(phrases)})")
+                got_phrase = True  # WS analyzed audio, even if no speech found
                 break
 
         sender.join(timeout=2)
         user_text = " ".join(phrases).strip()
 
-        if not user_text and rec_frames:
+        # Only fall back to REST if the WS never responded (connection failure).
+        # If WS returned a phrase status (even InitialSilenceTimeout) or turn.end,
+        # it already analyzed the audio — REST would just repeat the same result.
+        if not user_text and rec_frames and not got_phrase:
             _log(f"WS returned nothing, falling back to REST STT (frames={len(rec_frames)})")
             user_text = _rest_stt_fallback(rec_frames, _log)
+        elif not user_text and got_phrase:
+            _log(f"WS analyzed audio but found no speech (skipping REST fallback)")
 
         user_text = _strip_end_word(user_text, _end_word)
         _log(f"FINAL: {repr(user_text[:100])}")

@@ -693,10 +693,10 @@ def _prewarm_all():
             _get_stt_ws()
     except Exception:
         pass
-    # Keep TTS HTTP connection alive
+    # Keep TTS HTTP connection alive (use tts_region, not STT region)
     try:
         session = get_http_session()
-        region = CONFIG.get("region")
+        region = CONFIG.get("tts_region") or CONFIG.get("region")
         if region:
             session.head(f"https://{region}.tts.speech.microsoft.com", timeout=3)
     except Exception:

@@ -132,8 +132,26 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(hdGroup);
 
-        this._addEntryRow(hdGroup, 'HD Voice Name', 'voice',
-            'en-US-Ava:DragonHDLatestNeural');
+        this._addComboRow(hdGroup, 'HD Voice Name', 'voice', [
+            ['en-US-Ava:DragonHDLatestNeural', 'Ava (DragonHD)'],
+            ['en-US-Andrew:DragonHDLatestNeural', 'Andrew (DragonHD)'],
+            ['en-US-Brian:DragonHDLatestNeural', 'Brian (DragonHD)'],
+            ['en-US-Emma:DragonHDLatestNeural', 'Emma (DragonHD)'],
+            ['en-US-Aria:DragonHDLatestNeural', 'Aria (DragonHD)'],
+            ['en-US-Davis:DragonHDLatestNeural', 'Davis (DragonHD)'],
+            ['en-US-Jenny:DragonHDLatestNeural', 'Jenny (DragonHD)'],
+            ['en-US-Guy:DragonHDLatestNeural', 'Guy (DragonHD)'],
+            ['en-US-Steffan:DragonHDLatestNeural', 'Steffan (DragonHD)'],
+            ['en-US-Christopher:DragonHDLatestNeural', 'Christopher (DragonHD)'],
+            ['en-US-Eric:DragonHDLatestNeural', 'Eric (DragonHD)'],
+            ['en-US-Roger:DragonHDLatestNeural', 'Roger (DragonHD)'],
+            ['en-US-Alloy:DragonHDLatestNeural', 'Alloy (DragonHD)'],
+            ['en-US-Echo:DragonHDLatestNeural', 'Echo (DragonHD)'],
+            ['en-US-Fable:DragonHDLatestNeural', 'Fable (DragonHD)'],
+            ['en-US-Onyx:DragonHDLatestNeural', 'Onyx (DragonHD)'],
+            ['en-US-Nova:DragonHDLatestNeural', 'Nova (DragonHD)'],
+            ['en-US-Shimmer:DragonHDLatestNeural', 'Shimmer (DragonHD)'],
+        ], 'en-US-Ava:DragonHDLatestNeural');
 
         // ── Fast Voice ──
         const fastGroup = new Adw.PreferencesGroup({
@@ -142,21 +160,33 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(fastGroup);
 
-        this._addEntryRow(fastGroup, 'Fast Voice Name', 'fast_voice',
-            'en-US-AvaNeural');
-
-        // ── Common voices reference ──
-        const refGroup = new Adw.PreferencesGroup({
-            title: 'Common Voice Names',
-            description: [
-                'HD: en-US-Ava:DragonHDLatestNeural, en-US-Andrew:DragonHDLatestNeural,',
-                'en-US-Brian:DragonHDLatestNeural, en-US-Emma:DragonHDLatestNeural',
-                '',
-                'Fast: en-US-AvaNeural, en-US-AndrewNeural, en-US-JennyNeural,',
-                'en-US-GuyNeural, en-US-DavisNeural, en-US-AriaNeural',
-            ].join('\n'),
-        });
-        page.add(refGroup);
+        this._addComboRow(fastGroup, 'Fast Voice Name', 'fast_voice', [
+            ['en-US-AvaNeural', 'Ava'],
+            ['en-US-AndrewNeural', 'Andrew'],
+            ['en-US-AriaNeural', 'Aria'],
+            ['en-US-DavisNeural', 'Davis'],
+            ['en-US-JennyNeural', 'Jenny'],
+            ['en-US-GuyNeural', 'Guy'],
+            ['en-US-BrianNeural', 'Brian'],
+            ['en-US-EmmaNeural', 'Emma'],
+            ['en-US-SteffanNeural', 'Steffan'],
+            ['en-US-ChristopherNeural', 'Christopher'],
+            ['en-US-EricNeural', 'Eric'],
+            ['en-US-RogerNeural', 'Roger'],
+            ['en-US-MichelleNeural', 'Michelle'],
+            ['en-US-MonicaNeural', 'Monica'],
+            ['en-US-CoraNeural', 'Cora'],
+            ['en-US-JaneNeural', 'Jane'],
+            ['en-US-NancyNeural', 'Nancy'],
+            ['en-US-SaraNeural', 'Sara'],
+            ['en-US-TonyNeural', 'Tony'],
+            ['en-US-JasonNeural', 'Jason'],
+            ['en-US-BrandonNeural', 'Brandon'],
+            ['en-US-JacobNeural', 'Jacob'],
+            ['en-US-AmberNeural', 'Amber'],
+            ['en-US-AshleyNeural', 'Ashley'],
+            ['en-US-ElizabethNeural', 'Elizabeth'],
+        ], 'en-US-AvaNeural');
 
         // ── Speech Parameters ──
         const paramGroup = new Adw.PreferencesGroup({
@@ -512,15 +542,50 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'conversation_mode', false);
 
         this._addComboRow(convGroup, 'LLM Provider', 'llm_provider', [
-            ['anthropic', 'Anthropic (Claude)'],
-            ['openai', 'OpenAI (GPT)'],
+            ['anthropic', 'Anthropic (Claude API)'],
+            ['openai', 'OpenAI (GPT API)'],
+            ['azure', 'Azure AI Foundry'],
+            ['bedrock', 'AWS Bedrock'],
+            ['google', 'Google Vertex AI'],
+            ['cloud-chat-assistant', 'Cloud Chat Assistant (all providers)'],
         ], 'anthropic');
 
         this._addPasswordRow(convGroup, 'LLM API Key', 'llm_api_key',
             'API key for the selected LLM provider');
 
-        this._addEntryRow(convGroup, 'LLM Model', 'llm_model', 'claude-sonnet-4-20250514',
-            'Model to use for conversation');
+        this._addComboRow(convGroup, 'LLM Model', 'llm_model', [
+            // Anthropic (Direct API)
+            ['claude-opus-4-6', 'Claude Opus 4.6'],
+            ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
+            ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5'],
+            // OpenAI (Direct API)
+            ['gpt-4o', 'GPT-4o'],
+            ['gpt-4o-mini', 'GPT-4o Mini'],
+            ['o1', 'o1'],
+            ['o4-mini', 'o4-mini'],
+            ['o3-mini', 'o3-mini'],
+            ['gpt-5.3-chat', 'GPT-5.3 Chat'],
+            // Azure AI Foundry (Serverless)
+            ['grok-3', 'Grok-3 (xAI)'],
+            ['grok-3-mini', 'Grok-3 Mini (xAI)'],
+            ['DeepSeek-R1', 'DeepSeek R1'],
+            ['Meta-Llama-3.1-405B-Instruct', 'Llama 3.1 405B'],
+            ['Llama-3.3-70B-Instruct', 'Llama 3.3 70B'],
+            ['Llama-4-Scout-17B-16E-Instruct', 'Llama 4 Scout 17B'],
+            ['Phi-4', 'Phi-4 (Microsoft)'],
+            ['Codestral-2501', 'Codestral 2501 (Mistral)'],
+            // AWS Bedrock
+            ['claude-opus-4.6', 'Claude Opus 4.6 (Bedrock)'],
+            ['claude-sonnet-4.6', 'Claude Sonnet 4.6 (Bedrock)'],
+            ['nova-pro', 'Amazon Nova Pro'],
+            ['nova-lite', 'Amazon Nova Lite'],
+            ['llama4-maverick-17b', 'Llama 4 Maverick 17B (Bedrock)'],
+            ['palmyra-x5', 'Palmyra X5 (Writer)'],
+            // Google Vertex AI
+            ['gemini-2.5-flash', 'Gemini 2.5 Flash'],
+            ['gemini-2.5-pro', 'Gemini 2.5 Pro'],
+            ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro Preview'],
+        ], 'claude-opus-4-6');
 
         this._addEntryRow(convGroup, 'System Prompt', 'llm_system_prompt',
             'You are a helpful voice assistant. Keep responses concise and conversational.',

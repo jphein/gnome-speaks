@@ -591,6 +591,7 @@ class GnomeSpeaksService:
                     break
             elif mtype == "turn_end":
                 _log(f"turn.end received (phrases={len(phrases)})")
+                got_phrase = True  # WS analyzed audio, even if no speech found
                 # Signal sender to stop recording immediately
                 self._stop_event.set()
                 break
@@ -619,14 +620,20 @@ class GnomeSpeaksService:
                     if text:
                         GLib.idle_add(self._emit_partial_transcription, text)
                 elif mtype == "turn_end":
+                    got_phrase = True  # WS analyzed audio
                     break
 
         # 6. Final text
         user_text = " ".join(phrases).strip()
 
-        if not user_text and raw_frames:
+        # Only fall back to REST if WS never responded (connection failure).
+        # If WS returned a phrase status (even InitialSilenceTimeout) or turn.end,
+        # it already analyzed the audio — REST would just repeat the same result.
+        if not user_text and raw_frames and not got_phrase:
             _log(f"WS returned nothing, falling back to REST STT (frames={len(raw_frames)})")
             user_text = _rest_stt_fallback(raw_frames, _log) or ""
+        elif not user_text and got_phrase:
+            _log(f"WS analyzed audio but found no speech (skipping REST fallback)")
 
         user_text = _strip_end_word(user_text, end_word)
         _log(f"FINAL: {repr(user_text[:100])}")
@@ -774,18 +781,21 @@ class GnomeSpeaksService:
 
             api_key = CONFIG.get("llm_api_key", "")
             provider = CONFIG.get("llm_provider", "anthropic")
-            model = CONFIG.get("llm_model", "claude-sonnet-4-20250514")
+            model = CONFIG.get("llm_model", "claude-opus-4-6")
             system_prompt = CONFIG.get(
                 "llm_system_prompt",
                 "You are a helpful voice assistant. Keep responses concise and conversational.",
             )
 
-            if not api_key:
-                GLib.idle_add(self._emit_error, "No LLM API key configured")
-                self._set_state("idle")
-                return
+            reply = None
 
-            if provider == "anthropic":
+            if provider == "cloud-chat-assistant":
+                reply = self._call_cloud_chat_assistant(user_text, model, system_prompt)
+            elif provider == "anthropic":
+                if not api_key:
+                    GLib.idle_add(self._emit_error, "No Anthropic API key configured")
+                    self._set_state("idle")
+                    return
                 resp = http_requests.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
@@ -804,6 +814,10 @@ class GnomeSpeaksService:
                 resp.raise_for_status()
                 reply = resp.json()["content"][0]["text"]
             elif provider == "openai":
+                if not api_key:
+                    GLib.idle_add(self._emit_error, "No OpenAI API key configured")
+                    self._set_state("idle")
+                    return
                 resp = http_requests.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={
@@ -822,6 +836,69 @@ class GnomeSpeaksService:
                 )
                 resp.raise_for_status()
                 reply = resp.json()["choices"][0]["message"]["content"]
+            elif provider == "azure":
+                # Azure AI Foundry — uses cloud-chat-assistant config
+                cca_config = self._load_cca_config()
+                azure_key = cca_config.get("api_key", "")
+                endpoint = cca_config.get("endpoint", "")
+                if not azure_key or not endpoint:
+                    GLib.idle_add(self._emit_error, "Azure AI not configured in cloud-chat-assistant config")
+                    self._set_state("idle")
+                    return
+                # Check if serverless or deployed model
+                serverless = [
+                    "grok-3", "grok-3-mini", "DeepSeek-R1",
+                    "Meta-Llama-3.1-405B-Instruct", "Meta-Llama-3.1-8B-Instruct",
+                    "Llama-3.2-11B-Vision-Instruct", "Llama-3.2-90B-Vision-Instruct",
+                    "Llama-3.3-70B-Instruct", "Llama-4-Scout-17B-16E-Instruct",
+                    "Phi-4", "Cohere-command-r-plus-08-2024", "Cohere-command-r-08-2024",
+                    "Codestral-2501", "Ministral-3B",
+                ]
+                if model in serverless:
+                    url = f"{endpoint}/models/chat/completions?api-version=2024-12-01-preview"
+                    body = {"model": model, "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ], "max_tokens": 1024}
+                else:
+                    url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview"
+                    body = {"messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ], "max_tokens": 1024}
+                resp = http_requests.post(
+                    url,
+                    headers={"api-key": azure_key, "Content-Type": "application/json"},
+                    json=body,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                reply = resp.json()["choices"][0]["message"]["content"]
+            elif provider == "google":
+                cca_config = self._load_cca_config()
+                google_key = cca_config.get("google_api_key", "")
+                project = cca_config.get("google_project", "")
+                region = cca_config.get("google_region", "us-central1")
+                if not google_key:
+                    GLib.idle_add(self._emit_error, "Google API key not configured")
+                    self._set_state("idle")
+                    return
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={google_key}"
+                resp = http_requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "system_instruction": {"parts": [{"text": system_prompt}]},
+                        "contents": [{"parts": [{"text": user_text}]}],
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                reply = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            elif provider == "bedrock":
+                # AWS Bedrock — requires cloud-chat-assistant for SigV4 signing
+                reply = self._call_cloud_chat_assistant(user_text, model, system_prompt)
             else:
                 GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
                 self._set_state("idle")
@@ -835,6 +912,74 @@ class GnomeSpeaksService:
             log.exception("Conversation failed: %s", exc)
             GLib.idle_add(self._emit_error, f"LLM error: {exc}")
             self._set_state("idle")
+
+    def _load_cca_config(self):
+        """Load cloud-chat-assistant config."""
+        path = os.path.expanduser("~/.config/cloud-chat-assistant/config.json")
+        try:
+            with open(path) as f:
+                import json as _json
+                return _json.load(f)
+        except Exception:
+            return {}
+
+    def _call_cloud_chat_assistant(self, user_text, model, system_prompt):
+        """Call cloud-chat-assistant's chat function directly if available."""
+        cca_path = os.path.expanduser("~/Projects/cloud-chat-assistant")
+        if os.path.isdir(cca_path):
+            try:
+                import asyncio
+                if cca_path not in sys.path:
+                    sys.path.insert(0, cca_path)
+                import mcp_cloud_chat as cca
+                # Ensure cca uses the right config
+                cca_config = self._load_cca_config()
+                for k, v in cca_config.items():
+                    cca.CONFIG[k] = v
+                # Set the model
+                cca.CONFIG["deployment"] = model
+                cca.CONFIG["model"] = model
+                # Build messages
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ]
+                # Run async call in a new event loop
+                loop = asyncio.new_event_loop()
+                try:
+                    import httpx
+                    async def _do_chat():
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            return await cca.call_model(client, messages, None, model)
+                    result = loop.run_until_complete(_do_chat())
+                    return result.get("content", "") if isinstance(result, dict) else str(result)
+                finally:
+                    loop.close()
+            except Exception as exc:
+                log.warning("cloud-chat-assistant direct call failed: %s, falling back", exc)
+        # Fallback: use Anthropic API
+        import requests as http_requests
+        api_key = CONFIG.get("llm_api_key", "")
+        if not api_key:
+            GLib.idle_add(self._emit_error, "No API key and cloud-chat-assistant unavailable")
+            return None
+        resp = http_requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model if "claude" in model else "claude-opus-4-6",
+                "max_tokens": 1024,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_text}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["content"][0]["text"]
 
     # -- Stop --------------------------------------------------------------
 
@@ -1011,9 +1156,10 @@ def main():
         )
         # Continue anyway — we will emit Error signals on method calls
 
+    _speech_src = _LIVE_PATH if os.path.isdir(_LIVE_PATH) else os.path.join(_SCRIPT_DIR, "speech")
     log.info(
         "Starting GNOME Speaks service (speech=%s, region=%s, vad=%s, ws=%s)",
-        os.path.join(_SCRIPT_DIR, "speech"), CONFIG.get("region"), HAS_VAD, HAS_WS,
+        _speech_src, CONFIG.get("region"), HAS_VAD, HAS_WS,
     )
 
     # Prewarm recorder, WebSocket, and HTTP session so first call is instant

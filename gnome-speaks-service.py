@@ -259,6 +259,46 @@ def _is_ydotoold_running():
         return False
 
 
+def _reset_ydotoold():
+    """Restart ydotoold to clear any stuck key state on its virtual device.
+
+    When a ydotool command is interrupted between a key-down and key-up event,
+    the virtual uinput device retains that key as "pressed". The Wayland
+    compositor then suppresses that key from all physical keyboards. Restarting
+    the daemon destroys the old virtual device and creates a clean one.
+    """
+    if not _YDOTOOL_V1:
+        return
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", "ydotoold"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        # Give ydotoold time to create the new virtual device
+        time.sleep(0.1)
+        log.info("Reset ydotoold to clear stuck key state")
+    except Exception as e:
+        log.warning("Failed to restart ydotoold: %s", e)
+
+
+def _run_ydotool(args, **kwargs):
+    """Run a ydotool command, resetting ydotoold if it fails or times out.
+
+    Any interrupted ydotool key/type command can leave keys stuck on the
+    virtual device. This wrapper catches failures and restarts the daemon
+    to prevent permanent key loss.
+    """
+    try:
+        subprocess.run(args, **kwargs)
+    except subprocess.TimeoutExpired:
+        log.warning("ydotool timed out (%s), resetting ydotoold", args[1])
+        _reset_ydotoold()
+    except Exception as e:
+        log.warning("ydotool failed (%s): %s, resetting ydotoold", args[1], e)
+        _reset_ydotoold()
+
+
 def _send_backspaces(count):
     """Send N backspace keypresses via ydotool or xdotool. Blocks until complete."""
     if count <= 0:
@@ -268,14 +308,14 @@ def _send_backspaces(count):
             # v1.0+: -d for key-delay, repeat by listing key pairs N times
             # Listing all pairs is more reliable than --repeat which doesn't exist in v1
             keys = ["14:1", "14:0"] * count
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "key", "-d", "1"] + keys,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=5,
             )
         else:
             # v0.1.x: --delay for device registration, --key-delay, --repeat
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "key", "--delay", "50", "--key-delay", "0",
                  "--repeat", str(count), "14:1", "14:0"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -296,14 +336,14 @@ def _type_raw(text):
     if _TYPING_TOOL == "ydotool":
         if _YDOTOOL_V1:
             # v1.0+: pipe text via stdin to avoid argument-parsing space issues
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "type", "-d", "3", "--file", "-"],
                 input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10,
             )
         else:
             # v0.1.x: --delay for device registration, --key-delay between chars
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "type", "--delay", "50", "--key-delay", "0", "--", text],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -343,14 +383,14 @@ def _clipboard_paste(text):
     if _TYPING_TOOL == "ydotool":
         if _YDOTOOL_V1:
             # Ctrl(29) + Shift(42) + V(47) — works in terminals and most apps
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "key", "-d", "3",
                  "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=5,
             )
         else:
-            subprocess.run(
+            _run_ydotool(
                 ["ydotool", "key", "--delay", "50", "--key-delay", "3",
                  "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1679,6 +1719,7 @@ class GnomeSpeaksService:
         """Clean up resources on exit."""
         log.info("Shutting down")
         self.stop()
+        _reset_ydotoold()
         _discard_prewarmed_rec()
         _invalidate_stt_ws()
 
@@ -1896,6 +1937,7 @@ def main():
     )
 
     _detect_typing_tool()
+    _reset_ydotoold()
 
     # Detect audio output device and auto-enable echo cancellation
     _refresh_audio_detection()

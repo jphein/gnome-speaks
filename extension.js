@@ -168,10 +168,15 @@ export default class GnomeSpeaksExtension extends Extension {
         this._dragStartY = 0;
         this._dragBadgeStartX = 0;
         this._dragBadgeStartY = 0;
-        this._customPosition = null;
         this._badgeVisible = true;
         this._audioLevel = 0;
         this._settings = this.getSettings();
+
+        // Restore persisted badge position
+        let savedX = this._settings.get_int('badge-position-x');
+        let savedY = this._settings.get_int('badge-position-y');
+        this._customPosition = (savedX >= 0 && savedY >= 0)
+            ? {x: savedX, y: savedY} : null;
 
         this._createBadge();
         this._createPanelIndicator();
@@ -216,7 +221,6 @@ export default class GnomeSpeaksExtension extends Extension {
         this._destroyBadge();
 
         this._state = null;
-        this._customPosition = null;
         this._settings = null;
     }
 
@@ -410,6 +414,10 @@ export default class GnomeSpeaksExtension extends Extension {
                     this._dragBadgeStartY + dy
                 );
                 this._customPosition = {x: actor.x, y: actor.y};
+                if (this._settings) {
+                    this._settings.set_int('badge-position-x', Math.round(actor.x));
+                    this._settings.set_int('badge-position-y', Math.round(actor.y));
+                }
             }
             return Clutter.EVENT_STOP;
         });
@@ -852,6 +860,10 @@ export default class GnomeSpeaksExtension extends Extension {
     _connectLayoutSignals() {
         let monitorId = Main.layoutManager.connect('monitors-changed', () => {
             this._customPosition = null;
+            if (this._settings) {
+                this._settings.set_int('badge-position-x', -1);
+                this._settings.set_int('badge-position-y', -1);
+            }
             this._positionBadge();
         });
         this._layoutSignalId = monitorId;

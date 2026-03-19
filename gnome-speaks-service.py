@@ -1093,6 +1093,8 @@ class GnomeSpeaksService:
         """Background thread: TTS using speech_tts.tts()."""
         try:
             state._cancel_event.clear()
+            # Show text being spoken as live subtitle on badge
+            GLib.idle_add(self._emit_partial_transcription, text)
             result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
                                     audio_level_cb=self._tts_level_cb)
             if result.get("error"):
@@ -1174,10 +1176,13 @@ class GnomeSpeaksService:
         """Background thread: full-duplex TTS+STT via speech_tts.talk_fullduplex()."""
         try:
             state._cancel_event.clear()
+            # Show text being spoken as live subtitle on badge
+            GLib.idle_add(self._emit_partial_transcription, text)
 
             result = speech_tts.talk_fullduplex(
                 text, quality=self._voice_quality,
                 audio_level_cb=self._tts_level_cb,
+                partial_cb=lambda t: GLib.idle_add(self._emit_partial_transcription, t),
             )
 
             if result.get("error"):
@@ -1581,29 +1586,27 @@ class GnomeSpeaksService:
                 GLib.idle_add(self._emit_partial_transcription, speak_text)
 
                 if half_duplex:
-                    # Half-duplex: speak, then listen sequentially
+                    # Half-duplex: speak, then re-listen via streaming STT
                     log.info("Conversation reply (half-duplex): %s", speak_text[:100])
                     speech_tts.tts(speak_text, quality=self._voice_quality,
                                     audio_level_cb=self._tts_level_cb)
                     if state._cancel_event.is_set():
                         self._set_state("idle")
                         return
-                    # Listen for next turn
-                    self._set_state("listening")
-                    _prewarm_recorder()
-                    try:
-                        if HAS_WS:
-                            _get_stt_ws()
-                    except Exception:
-                        pass
-                    stt_result = stt_dispatch()
-                    user_reply = stt_result.get("text", "") if isinstance(stt_result, dict) else ""
+                    # Re-listen via start_listening → _streaming_stt_worker,
+                    # which routes back to _conversation_worker when
+                    # conversation_mode is on, giving full streaming partials.
+                    self._set_state("idle")
+                    _schedule_warmup()
+                    GLib.idle_add(lambda: self.start_listening() or False)
+                    return
                 else:
                     # Full-duplex: speak + listen simultaneously
                     log.info("Conversation reply (full-duplex): %s", speak_text[:100])
                     result = speech_tts.talk_fullduplex(
                         speak_text, quality=self._voice_quality,
                         audio_level_cb=self._tts_level_cb,
+                        partial_cb=lambda t: GLib.idle_add(self._emit_partial_transcription, t),
                     )
                     user_reply = result.get("text", "")
 

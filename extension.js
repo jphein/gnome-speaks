@@ -82,6 +82,12 @@ const DBUS_XML = `
     <method name="GetHandsFree">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="ToggleTerminalMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetTerminalMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
     <method name="GetAudioInfo">
       <arg direction="out" type="s" name="info"/>
     </method>
@@ -358,20 +364,23 @@ export default class GnomeSpeaksExtension extends Extension {
         this._continuousMode = false;
         this._handsFreeMode = false;
         this._bargeInMode = false;
+        this._terminalMode = false;
 
         this._qualityPill = this._createPill('✦', 'gnome-speaks-quality-hd', () => this._toggleVoiceQuality());
         this._modePill = this._createPill('✏️', 'gnome-speaks-mode-dict', () => this._toggleMode());
         this._continuousPill = this._createPill('🔄', 'gnome-speaks-pill-off', () => this._toggleContinuous());
         this._handsFreePill = this._createPill('🙌', 'gnome-speaks-pill-off', () => this._toggleHandsFree());
         this._bargeInPill = this._createPill('⏸', 'gnome-speaks-pill-off', () => this._toggleBargeIn());
+        this._terminalPill = this._createPill('>', 'gnome-speaks-pill-off', () => this._toggleTerminal());
 
         this._badge.add_child(this._qualityPill);
         this._badge.add_child(this._modePill);
         this._badge.add_child(this._continuousPill);
         this._badge.add_child(this._handsFreePill);
         this._badge.add_child(this._bargeInPill);
+        this._badge.add_child(this._terminalPill);
 
-        this._pills = [this._qualityPill, this._modePill, this._continuousPill, this._handsFreePill, this._bargeInPill];
+        this._pills = [this._qualityPill, this._modePill, this._continuousPill, this._handsFreePill, this._bargeInPill, this._terminalPill];
         for (let pill of this._pills)
             pill.hide();
 
@@ -582,6 +591,27 @@ export default class GnomeSpeaksExtension extends Extension {
         this._bargeInPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
     }
 
+    _toggleTerminal() {
+        if (!this._proxy) {
+            this._terminalMode = !this._terminalMode;
+            this._updateTerminalPill();
+            return;
+        }
+        this._proxy.ToggleTerminalModeRemote((result, error) => {
+            if (error) return;
+            this._terminalMode = result[0];
+            this._updateTerminalPill();
+        });
+    }
+
+    _updateTerminalPill() {
+        if (!this._terminalPill) return;
+        let on = this._terminalMode;
+        this._terminalPill.text = on ? '> Term' : '>';
+        this._terminalPill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
+        this._terminalPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
+    }
+
     _showPills(visible) {
         if (!this._pills) return;
         for (let pill of this._pills) {
@@ -649,6 +679,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._continuousPill = null;
         this._handsFreePill = null;
         this._bargeInPill = null;
+        this._terminalPill = null;
         this._pills = null;
     }
 
@@ -947,6 +978,7 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
 
         this._proxy.GetStateRemote((result, error) => {
+            if (!this._proxy) return;
             if (error) {
                 log(`[GNOME Speaks] GetState failed: ${error.message}`);
                 return;
@@ -957,6 +989,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync voice quality pill + menu label
         this._proxy.GetVoiceQualityRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result && result[0]) {
                 this._voiceQuality = result[0];
                 this._updateQualityPill();
@@ -968,6 +1001,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync audio device info
         this._proxy.GetAudioInfoRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result && result[0]) {
                 try {
                     let info = JSON.parse(result[0]);
@@ -980,6 +1014,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync mode states from service
         this._proxy.GetConversationModeRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result) {
                 this._conversationMode = result[0];
                 this._updateModePill();
@@ -988,6 +1023,7 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         });
         this._proxy.GetContinuousDictationRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result) {
                 this._continuousMode = result[0];
                 this._updateContinuousPill();
@@ -996,6 +1032,7 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         });
         this._proxy.GetHandsFreeRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result) {
                 this._handsFreeMode = result[0];
                 this._updateHandsFreePill();
@@ -1004,9 +1041,17 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         });
         this._proxy.GetBargeInRemote((result, error) => {
+            if (!this._proxy) return;
             if (!error && result) {
                 this._bargeInMode = result[0];
                 this._updateBargeInPill();
+            }
+        });
+        this._proxy.GetTerminalModeRemote((result, error) => {
+            if (!this._proxy) return;
+            if (!error && result) {
+                this._terminalMode = result[0];
+                this._updateTerminalPill();
             }
         });
     }
@@ -1054,6 +1099,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._updateContinuousPill();
         this._updateHandsFreePill();
         this._updateBargeInPill();
+        this._updateTerminalPill();
 
         // Update panel icon and menu
         this._updatePanelIcon(newState);

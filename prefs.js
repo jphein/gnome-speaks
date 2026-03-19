@@ -108,6 +108,14 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'Type transcribed text where the cursor is. When off, text is copied to clipboard only.',
             'dictation_mode', true);
 
+        this._addSwitchRow(typeGroup, 'Skip Final Paste',
+            'Keep live-typed text as-is instead of replacing it with the final corrected transcription',
+            'skip_final_paste', true);
+
+        this._addSwitchRow(typeGroup, 'Terminal Mode',
+            'All lowercase, no auto-capitalization or punctuation. Uses Azure Lexical output for code and terminal input.',
+            'terminal_mode', false);
+
         this._addSwitchRow(typeGroup, 'Voice Commands',
             'Convert spoken punctuation ("period", "comma", "new line") to characters',
             'voice_commands', true);

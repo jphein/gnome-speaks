@@ -159,6 +159,12 @@ INTROSPECTION_XML = """
     <method name="GetHandsFree">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="ToggleTerminalMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetTerminalMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
     <method name="Talk">
       <arg direction="in" type="s" name="text"/>
       <arg direction="out" type="s" name="reply"/>
@@ -799,6 +805,7 @@ class GnomeSpeaksService:
         live_typing = (CONFIG.get("dictation_mode", True)
                        and not CONFIG.get("conversation_mode", False)
                        and _TYPING_TOOL in ("ydotool", "xdotool"))
+        use_lexical = CONFIG.get("terminal_mode", False)
         typed_partial = [""]  # mutable: text currently live-typed into the text field
         raw_partial = [""]    # unwindowed hypothesis text for live typing diff
 
@@ -910,7 +917,7 @@ class GnomeSpeaksService:
                 break
 
             mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
-                                  raw_partial_holder=raw_partial)
+                                  raw_partial_holder=raw_partial, use_lexical=use_lexical)
 
             if mtype == "hypothesis":
                 text = partial_holder[0]
@@ -960,7 +967,7 @@ class GnomeSpeaksService:
                 except Exception:
                     break
                 mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
-                                      raw_partial_holder=raw_partial)
+                                      raw_partial_holder=raw_partial, use_lexical=use_lexical)
                 if mtype == "phrase":
                     got_phrase = True
                     text = partial_holder[0]
@@ -983,6 +990,8 @@ class GnomeSpeaksService:
             _log(f"WS analyzed audio but found no speech (skipping REST fallback)")
 
         user_text = _strip_end_word(user_text, end_word)
+        if use_lexical and user_text:
+            user_text = user_text.lower()
         _log(f"FINAL: {repr(user_text[:100])}")
 
         # 7. Post-process: voice commands and auto-corrections
@@ -1008,7 +1017,10 @@ class GnomeSpeaksService:
 
             # Type at cursor (dictation mode) or just copy to clipboard
             if CONFIG.get("dictation_mode", True):
-                if live_typing:
+                if live_typing and CONFIG.get("skip_final_paste", False):
+                    # Keep the live-typed partial text as-is, no erase+paste
+                    pass
+                elif live_typing:
                     # Erase the live partial and paste the clean final text
                     _send_backspaces(len(typed_partial[0]))
                     time.sleep(0.02)
@@ -1250,6 +1262,15 @@ class GnomeSpeaksService:
         cont = CONFIG.get("continuous_dictation", False)
         return conv and cont
 
+    def toggle_terminal_mode(self):
+        current = CONFIG.get("terminal_mode", False)
+        CONFIG["terminal_mode"] = not current
+        log.info("Terminal mode: %s", not current)
+        return not current
+
+    def get_terminal_mode(self):
+        return CONFIG.get("terminal_mode", False)
+
     def toggle_hands_free(self):
         """Toggle hands-free mode: enables both continuous_dictation + conversation_mode together."""
         # If either is off, turn both on; if both are on, turn both off
@@ -1397,6 +1418,16 @@ class GnomeSpeaksService:
 
         custom = CONFIG.get("llm_system_prompt", "")
         parts = [custom] if custom else [self._BASE_SYSTEM_PROMPT]
+
+        # Terminal mode: inject command-generation context
+        if CONFIG.get("terminal_mode", False):
+            parts.append(
+                "TERMINAL MODE IS ON. The user is working in a terminal. "
+                "When they describe something to run, wrap the exact command in <type>...</type> tags. "
+                "Keep explanations extremely brief — prefer just the command. "
+                "Use lowercase, no markdown, no code fences. "
+                "If they ask a general question, answer normally (spoken aloud)."
+            )
 
         # Intent-based dynamic context injection
         intents = self._detect_intents(user_text)

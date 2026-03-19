@@ -67,19 +67,23 @@ const SUBTITLE_COLORS = [
 export default class GnomeSpeaksPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         this._config = this._loadConfig();
+        this._ccaConfig = this._loadCcaConfig();
         this._settings = this.getSettings();
         this._saveTimeoutId = null;
+        this._ccaSaveTimeoutId = null;
 
         window.set_default_size(720, 860);
         window.set_search_enabled(true);
 
         window.connect('close-request', () => {
             this._flushConfigSave();
+            this._flushCcaConfigSave();
             return false;
         });
 
         this._addModesPage(window);
         this._addAzurePage(window);
+        this._addCloudAIPage(window);
         this._addVoicePage(window);
         this._addListeningPage(window);
         this._addAudioPage(window);
@@ -269,6 +273,122 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
 
         this._addPasswordRow(ttsGroup, 'TTS API Key', 'tts_key',
             'Leave empty to use the primary key');
+
+        window.add(page);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Page — Cloud AI Providers (cloud-chat-assistant config)
+    // ═══════════════════════════════════════════════════════════════════
+    _addCloudAIPage(window) {
+        const page = new Adw.PreferencesPage({
+            title: 'Cloud AI',
+            icon_name: 'weather-overcast-symbolic',
+        });
+
+        // ── Azure AI Foundry ──
+        const azureAiGroup = new Adw.PreferencesGroup({
+            title: 'Azure AI Foundry',
+            description: 'Azure AI endpoint for serverless and deployed models (GPT, Grok, DeepSeek, Llama, Phi, etc.).',
+        });
+        page.add(azureAiGroup);
+
+        this._addCcaEntryRow(azureAiGroup, 'Endpoint', 'endpoint', '',
+            'Azure AI services endpoint URL');
+
+        this._addCcaPasswordRow(azureAiGroup, 'API Key', 'api_key',
+            'Azure AI API key');
+
+        this._addCcaComboRow(azureAiGroup, 'Model Type', 'model_type', [
+            ['bedrock', 'AWS Bedrock'],
+            ['deployed', 'Azure Deployed'],
+            ['serverless', 'Azure Serverless'],
+            ['google', 'Google Vertex AI'],
+        ], 'bedrock');
+
+        this._addCcaEntryRow(azureAiGroup, 'Deployment', 'deployment', '',
+            'Azure deployment name (for deployed models)');
+
+        // ── AWS Bedrock ──
+        const awsGroup = new Adw.PreferencesGroup({
+            title: 'AWS Bedrock',
+            description: 'AWS credentials for Claude, Nova, Llama 4, and other Bedrock models.',
+        });
+        page.add(awsGroup);
+
+        this._addCcaPasswordRow(awsGroup, 'Access Key', 'aws_access_key',
+            'AWS Access Key ID');
+
+        this._addCcaPasswordRow(awsGroup, 'Secret Key', 'aws_secret_key',
+            'AWS Secret Access Key');
+
+        this._addCcaComboRow(awsGroup, 'Region', 'aws_region', [
+            ['us-east-1', 'US East 1 (N. Virginia)'],
+            ['us-west-2', 'US West 2 (Oregon)'],
+            ['eu-west-1', 'EU West 1 (Ireland)'],
+            ['eu-central-1', 'EU Central 1 (Frankfurt)'],
+            ['ap-southeast-1', 'AP Southeast 1 (Singapore)'],
+            ['ap-northeast-1', 'AP Northeast 1 (Tokyo)'],
+        ], 'us-east-1');
+
+        // ── Google Vertex AI ──
+        const googleGroup = new Adw.PreferencesGroup({
+            title: 'Google Vertex AI',
+            description: 'Google Cloud credentials for Gemini models.',
+        });
+        page.add(googleGroup);
+
+        this._addCcaPasswordRow(googleGroup, 'API Key', 'google_api_key',
+            'Google Cloud API key');
+
+        this._addCcaEntryRow(googleGroup, 'Project ID', 'google_project', '',
+            'GCP project ID or number');
+
+        this._addCcaComboRow(googleGroup, 'Region', 'google_region', [
+            ['global', 'Global'],
+            ['us-east4', 'US East 4'],
+            ['us-central1', 'US Central 1'],
+            ['us-west1', 'US West 1'],
+            ['europe-west1', 'Europe West 1'],
+            ['europe-west4', 'Europe West 4'],
+            ['asia-southeast1', 'Asia Southeast 1'],
+        ], 'global');
+
+        // ── Generation Parameters ──
+        const genGroup = new Adw.PreferencesGroup({
+            title: 'Generation',
+            description: 'LLM response generation parameters.',
+        });
+        page.add(genGroup);
+
+        this._addCcaSpinRow(genGroup, 'Temperature', 'temperature',
+            0.0, 2.0, 0.1, 1, 1.0,
+            '0 = deterministic, 2 = maximum randomness');
+
+        this._addCcaSpinRow(genGroup, 'Max Tokens', 'max_completion_tokens',
+            64, 128000, 256, 0, 2048,
+            'Maximum tokens in LLM response');
+
+        this._addCcaComboRow(genGroup, 'Reasoning Effort', 'reasoning_effort', [
+            ['low', 'Low'],
+            ['medium', 'Medium'],
+            ['high', 'High'],
+        ], 'high');
+
+        this._addCcaSpinRow(genGroup, 'Max Conversation Turns', 'conversation_max_turns',
+            1, 500, 10, 0, 50,
+            'History turns before auto-trimming');
+
+        // ── Multi-Chat ──
+        const multiGroup = new Adw.PreferencesGroup({
+            title: 'Multi-Chat',
+            description: 'Compare responses from multiple models simultaneously.',
+        });
+        page.add(multiGroup);
+
+        this._addCcaSpinRow(multiGroup, 'Timeout (seconds)', 'multi_chat_timeout',
+            5, 120, 5, 0, 15,
+            'Per-model timeout for multi-chat queries');
 
         window.add(page);
     }
@@ -1334,6 +1454,181 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             this._saveTimeoutId = null;
             this._saveConfig();
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Config I/O — ~/.config/cloud-chat-assistant/config.json
+    // ═══════════════════════════════════════════════════════════════════
+
+    _loadCcaConfig() {
+        const path = GLib.build_filenamev([
+            GLib.get_home_dir(), '.config', 'cloud-chat-assistant', 'config.json',
+        ]);
+        try {
+            const [ok, contents] = GLib.file_get_contents(path);
+            if (ok) {
+                const decoder = new TextDecoder('utf-8');
+                return JSON.parse(decoder.decode(contents));
+            }
+        } catch (e) {
+            // File doesn't exist or parse error — start fresh
+        }
+        return {};
+    }
+
+    _saveCcaConfig() {
+        const dir = GLib.build_filenamev([
+            GLib.get_home_dir(), '.config', 'cloud-chat-assistant',
+        ]);
+        GLib.mkdir_with_parents(dir, 0o755);
+
+        const path = GLib.build_filenamev([dir, 'config.json']);
+        const json = JSON.stringify(this._ccaConfig, null, 2) + '\n';
+        const encoder = new TextEncoder();
+        GLib.file_set_contents(path, encoder.encode(json));
+    }
+
+    _setCcaConfigValue(key, value) {
+        this._ccaConfig[key] = value;
+        this._scheduleCcaConfigSave();
+    }
+
+    _deleteCcaConfigKey(key) {
+        delete this._ccaConfig[key];
+        this._scheduleCcaConfigSave();
+    }
+
+    _scheduleCcaConfigSave() {
+        if (this._ccaSaveTimeoutId) {
+            GLib.Source.remove(this._ccaSaveTimeoutId);
+            this._ccaSaveTimeoutId = null;
+        }
+        this._ccaSaveTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            this._saveCcaConfig();
+            this._ccaSaveTimeoutId = null;
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _flushCcaConfigSave() {
+        if (this._ccaSaveTimeoutId) {
+            GLib.Source.remove(this._ccaSaveTimeoutId);
+            this._ccaSaveTimeoutId = null;
+            this._saveCcaConfig();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Widget Helpers — cloud-chat-assistant config backed
+    // ═══════════════════════════════════════════════════════════════════
+
+    _addCcaComboRow(group, title, configKey, options, defaultValue) {
+        const values = options.map(o => o[0]);
+        const labels = options.map(o => o[1]);
+
+        const currentValue = this._ccaConfig[configKey] ?? defaultValue;
+        let selectedIdx = values.findIndex(v => String(v) === String(currentValue));
+        if (selectedIdx < 0) selectedIdx = 0;
+
+        const model = Gtk.StringList.new(labels);
+        const row = new Adw.ComboRow({
+            title: title,
+            model: model,
+            selected: selectedIdx,
+        });
+
+        row.connect('notify::selected', () => {
+            const idx = row.get_selected();
+            if (idx >= 0 && idx < values.length) {
+                const val = values[idx];
+                if (val === '' || val === null)
+                    this._deleteCcaConfigKey(configKey);
+                else
+                    this._setCcaConfigValue(configKey, val);
+            }
+        });
+
+        group.add(row);
+        return row;
+    }
+
+    _addCcaEntryRow(group, title, configKey, defaultValue, description) {
+        const currentValue = this._ccaConfig[configKey] ?? defaultValue;
+        const row = new Adw.EntryRow({
+            title: title,
+            text: currentValue != null ? String(currentValue) : '',
+            show_apply_button: true,
+        });
+
+        row.connect('apply', () => {
+            const text = row.get_text().trim();
+            if (text === '')
+                this._deleteCcaConfigKey(configKey);
+            else
+                this._setCcaConfigValue(configKey, text);
+        });
+
+        group.add(row);
+        return row;
+    }
+
+    _addCcaPasswordRow(group, title, configKey, subtitle) {
+        const currentValue = this._ccaConfig[configKey] || '';
+
+        let row;
+        try {
+            row = new Adw.PasswordEntryRow({
+                title: title,
+                text: currentValue,
+                show_apply_button: true,
+            });
+        } catch (e) {
+            row = new Adw.EntryRow({
+                title: title,
+                text: currentValue,
+                show_apply_button: true,
+            });
+        }
+
+        row.connect('apply', () => {
+            const text = row.get_text().trim();
+            if (text === '')
+                this._deleteCcaConfigKey(configKey);
+            else
+                this._setCcaConfigValue(configKey, text);
+        });
+
+        group.add(row);
+        return row;
+    }
+
+    _addCcaSpinRow(group, title, configKey, lower, upper, step, digits, defaultValue, subtitle) {
+        const currentValue = this._ccaConfig[configKey] ?? defaultValue;
+        const adjustment = new Gtk.Adjustment({
+            lower: lower,
+            upper: upper,
+            step_increment: step,
+            page_increment: step * 10,
+            value: currentValue,
+        });
+
+        const row = new Adw.SpinRow({
+            title: title,
+            subtitle: subtitle || '',
+            adjustment: adjustment,
+            digits: digits,
+            value: currentValue,
+        });
+
+        row.connect('notify::value', () => {
+            const val = digits > 0
+                ? Math.round(row.value * Math.pow(10, digits)) / Math.pow(10, digits)
+                : Math.round(row.value);
+            this._setCcaConfigValue(configKey, val);
+        });
+
+        group.add(row);
+        return row;
     }
 
     // ═══════════════════════════════════════════════════════════════════

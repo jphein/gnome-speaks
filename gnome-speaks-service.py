@@ -353,7 +353,7 @@ def _type_raw(text):
         if _YDOTOOL_V1:
             # v1.0+: pipe text via stdin to avoid argument-parsing space issues
             _run_ydotool(
-                ["ydotool", "type", "-d", "3", "--file", "-"],
+                ["ydotool", "type", "-d", "1", "--file", "-"],
                 input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10,
             )
@@ -875,7 +875,10 @@ class GnomeSpeaksService:
                 silence_frames = 0
                 speech_frames = 0
                 total_frames = 0
-                max_silence = int(state.SILENCE_TIMEOUT * 1000 / FRAME_MS)
+                # In loop mode, use tighter silence timeout (1.2s vs 3.0s)
+                # so cycles end faster when the user pauses between phrases.
+                silence_sec = 1.2 if is_loop else state.SILENCE_TIMEOUT
+                max_silence = int(silence_sec * 1000 / FRAME_MS)
                 max_no_speech = int(state.NO_SPEECH_TIMEOUT * 1000 / FRAME_MS)
                 min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)
                 max_frames = int(MAX_LISTEN_SECONDS * 1000 / FRAME_MS)
@@ -926,13 +929,28 @@ class GnomeSpeaksService:
             except Exception as exc:
                 _log(f"sender exception: {exc}")
             finally:
-                proc.terminate()
-                proc.wait()
-                state.unregister_proc(proc)
                 try:
                     ws.send(_make_ws_audio_msg(request_id, b""), opcode=websocket.ABNF.OPCODE_BINARY)
                 except Exception as exc:
                     _log(f"WS final audio send failed: {exc}")
+                # In loop mode, keep the recorder alive for the next cycle
+                # instead of killing and restarting it. Eliminates subprocess
+                # startup latency and captures audio during the gap.
+                if is_loop and not self._stop_event.is_set():
+                    state.unregister_proc(proc)
+                    with state._prewarmed_rec_lock:
+                        old = state._prewarmed_rec
+                        state._prewarmed_rec = proc
+                    if old and old is not proc:
+                        try:
+                            old.kill()
+                            old.wait(timeout=2)
+                        except Exception:
+                            pass
+                else:
+                    proc.terminate()
+                    proc.wait()
+                    state.unregister_proc(proc)
                 sender_done.set()
 
         sender = threading.Thread(target=send_audio, daemon=True)
@@ -1095,19 +1113,17 @@ class GnomeSpeaksService:
 
         self._set_state("idle")
 
-        # 9. Prewarm for next use
-        _schedule_warmup()
+        # 9. Continuous dictation: restart immediately from worker thread
+        # (skips GLib main-loop round-trip). Clear _stop_event if it was set
+        # by a natural turn_end — that's not a user-initiated stop.
+        if CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
+            if natural_end:
+                self._stop_event.clear()
+            self.start_listening(quick=True)
+            return
 
-        # 10. Continuous dictation: auto-restart listening
-        # Restart if: text was captured, continuous mode is on, and either the
-        # turn ended naturally (turn_end from Azure) or _stop_event was never
-        # set (silence/VAD ended recording). Skip restart only when the user
-        # explicitly stopped (stop_listening/stop set _stop_event without turn_end).
-        if user_text and CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
-            GLib.idle_add(lambda: self.start_listening(quick=True)
-                          if (CONFIG.get("continuous_dictation", False)
-                              and not self._stop_event.is_set())
-                          else False)
+        # 10. Prewarm for next use (only when not restarting immediately)
+        _schedule_warmup()
 
     def stop_listening(self):
         """Stop recording but keep accumulated text. Returns transcription."""

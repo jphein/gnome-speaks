@@ -667,10 +667,15 @@ class GnomeSpeaksService:
 
     # -- STT: Streaming WebSocket using speech-to-cli building blocks ------
 
-    def start_listening(self):
-        """Start microphone recording with STT. Returns 'ok' or error string."""
-        self._reload_config_flags()
-        _refresh_audio_detection()
+    def start_listening(self, quick=False):
+        """Start microphone recording with STT. Returns 'ok' or error string.
+
+        If quick=True, skip config reload and audio detection refresh.
+        Used for tight loop restarts where config hasn't changed.
+        """
+        if not quick:
+            self._reload_config_flags()
+            _refresh_audio_detection()
         if self.current_state != "idle":
             return f"error: busy ({self.current_state})"
 
@@ -765,7 +770,7 @@ class GnomeSpeaksService:
             _schedule_warmup()
 
             if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
-                GLib.idle_add(lambda: self.start_listening()
+                GLib.idle_add(lambda: self.start_listening(quick=True)
                               if (CONFIG.get("continuous_dictation", False)
                                   and not self._stop_event.is_set())
                               else False)
@@ -843,6 +848,7 @@ class GnomeSpeaksService:
         end_word_event = threading.Event()
         sender_done = threading.Event()
         raw_frames = []
+        is_loop = CONFIG.get("continuous_dictation", False)
         live_typing = (CONFIG.get("dictation_mode", True)
                        and not CONFIG.get("conversation_mode", False)
                        and _TYPING_TOOL in ("ydotool", "xdotool"))
@@ -1062,9 +1068,13 @@ class GnomeSpeaksService:
 
             # Type at cursor (dictation mode) or just copy to clipboard
             if CONFIG.get("dictation_mode", True):
-                if live_typing and CONFIG.get("skip_final_paste", False):
-                    # Keep the live-typed partial text as-is, no erase+paste
-                    pass
+                if live_typing and (is_loop or CONFIG.get("skip_final_paste", False)):
+                    # Loop/skip mode: keep the live-typed hypothesis as-is.
+                    # No erase+repaste — avoids desync from ydotool char drops.
+                    # Type a space separator so the next cycle's text doesn't
+                    # run into this one.
+                    if is_loop and typed_partial[0]:
+                        _type_raw(" ")
                 elif live_typing:
                     # Erase the live partial and paste the clean final text
                     _send_backspaces(len(typed_partial[0]))
@@ -1094,7 +1104,7 @@ class GnomeSpeaksService:
         # set (silence/VAD ended recording). Skip restart only when the user
         # explicitly stopped (stop_listening/stop set _stop_event without turn_end).
         if user_text and CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
-            GLib.idle_add(lambda: self.start_listening()
+            GLib.idle_add(lambda: self.start_listening(quick=True)
                           if (CONFIG.get("continuous_dictation", False)
                               and not self._stop_event.is_set())
                           else False)
@@ -1177,7 +1187,7 @@ class GnomeSpeaksService:
                     and CONFIG.get("conversation_mode", False)
                     and not self._stop_event.is_set()):
                 log.info("Hands-free: auto-restarting listening after TTS")
-                GLib.idle_add(lambda: self.start_listening()
+                GLib.idle_add(lambda: self.start_listening(quick=True)
                               if (CONFIG.get("continuous_dictation", False)
                                   and CONFIG.get("conversation_mode", False)
                                   and not self._stop_event.is_set())
@@ -1528,6 +1538,23 @@ class GnomeSpeaksService:
             history = list(self._conversation_history[-40:])
         return system_prompt, history
 
+    def _maybe_loop_restart(self):
+        """Restart listening in AI+Loop mode. Called from worker thread."""
+        if (CONFIG.get("continuous_dictation", False)
+                and CONFIG.get("conversation_mode", False)
+                and not self._stop_event.is_set()):
+            log.info("AI+Loop: quick-restart listening")
+            _schedule_warmup()
+            # Direct call from worker thread — skip config reload and
+            # audio detection since nothing changed within the loop.
+            # Use GLib.idle_add because start_listening touches state
+            # that must be set from the main thread context.
+            GLib.idle_add(lambda: self.start_listening(quick=True)
+                          if not self._stop_event.is_set()
+                          else False)
+        else:
+            _schedule_warmup()
+
     def _parse_type_tags(self, reply):
         """Extract <type>...</type> content and remaining spoken text.
 
@@ -1678,12 +1705,14 @@ class GnomeSpeaksService:
                 type_text, speak_text = self._parse_type_tags(reply)
                 if type_text:
                     log.info("Typing %d chars at cursor", len(type_text))
-                    type_at_cursor(type_text)
+                    # Paste via clipboard for reliability — ydotool keystroke
+                    # simulation at high speed drops spaces in terminals
+                    _clipboard_paste(type_text)
 
-                # If there's nothing left to speak, go idle
+                # If there's nothing left to speak, go idle and maybe loop
                 if not speak_text or not speak_text.strip():
                     self._set_state("idle")
-                    _schedule_warmup()
+                    self._maybe_loop_restart()
                     return
 
                 self._set_state("speaking")
@@ -1704,26 +1733,12 @@ class GnomeSpeaksService:
 
                 # Half-duplex drain: on speakers, wait for audio buffers to
                 # fully flush before opening mic. PipeWire/Pulse can buffer
-                # ~200-500ms of audio after the player process exits.
+                # ~200-500ms after the player process exits.
                 if CONFIG.get("half_duplex", False):
-                    time.sleep(1.0)
-                    _schedule_warmup()
+                    time.sleep(0.5)
 
                 self._set_state("idle")
-
-                # In loop mode, restart listening immediately — don't wait
-                # for the roundabout path through the streaming worker exit.
-                # The lambda re-checks _stop_event so a Stop call between
-                # queuing and execution actually stops the loop.
-                if (CONFIG.get("continuous_dictation", False)
-                        and CONFIG.get("conversation_mode", False)
-                        and not self._stop_event.is_set()):
-                    log.info("AI+Loop: quick-restart listening")
-                    GLib.idle_add(lambda: self.start_listening()
-                                  if (CONFIG.get("continuous_dictation", False)
-                                      and CONFIG.get("conversation_mode", False)
-                                      and not self._stop_event.is_set())
-                                  else False)
+                self._maybe_loop_restart()
             else:
                 self._set_state("idle")
         except Exception as exc:

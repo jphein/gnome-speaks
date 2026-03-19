@@ -2,6 +2,42 @@
 
 A GNOME Shell extension that adds voice interaction to your desktop — speech-to-text dictation and text-to-speech readback — powered by [Azure Speech Services](https://azure.microsoft.com/en-us/products/ai-services/speech-services).
 
+## Ecosystem
+
+GNOME Speaks is the desktop integration layer for a four-project voice AI system:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     GNOME Shell (Wayland)                         │
+│  ┌─────────────┐                                                 │
+│  │ extension.js │ ◄──── UI only: badge, panel menu, keybindings  │
+│  └──────┬──────┘                                                 │
+│         │ D-Bus (org.gnome.Speaks)                                │
+│  ┌──────▼──────────────────┐                                     │
+│  │ gnome-speaks-service.py │ ◄──── Orchestrator                  │
+│  └──┬─────────┬────────────┘                                     │
+│     │         │                                                  │
+│  ┌──▼──┐  ┌──▼──────────────────┐   ┌──────────────────────┐    │
+│  │ STT │  │ LLM (direct API or  │   │   the-oracle         │    │
+│  │ TTS │  │ cloud-chat-assistant)│   │   (web UI + proxy)   │    │
+│  └──┬──┘  └─────────────────────┘   └──────────┬───────────┘    │
+│     │                                           │                │
+│  ┌──▼────────────┐              ┌───────────────▼────────────┐   │
+│  │ speech-to-cli  │              │ cloud-chat-assistant (MCP) │   │
+│  │ (audio engine) │              │ Azure AI / Bedrock / Google│   │
+│  └────────────────┘              └───────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+| Project | Role | Config file |
+|---------|------|-------------|
+| [speech-to-cli](https://github.com/jphein/speech-to-cli) | Audio engine — STT, TTS, VAD, recorder, WebSocket | `~/.config/speech-to-cli/config.json` |
+| [cloud-chat-assistant](https://github.com/jphein/cloud-chat-assistant) | Multi-cloud LLM provider — Azure AI, Bedrock, Google | `~/.config/cloud-chat-assistant/config.json` |
+| [the-oracle](https://github.com/jphein/the-oracle) | Web frontend — proxies both MCP servers through FastMCP | Reads both config files above |
+| **gnome-speaks** (this project) | GNOME Shell integration — badge, panel, keybindings, modes | Both config files + GSettings |
+
+GNOME Speaks preferences can configure all four projects from one unified settings panel.
+
 ## Features
 
 - **Floating voice badge** — glassmorphism-styled status indicator with pulse animations
@@ -9,6 +45,8 @@ A GNOME Shell extension that adds voice interaction to your desktop — speech-t
 - **Speech-to-text** — real-time streaming transcription via Azure WebSocket STT
 - **Live typing** — partial transcriptions appear in the text field as you speak, replaced by the final text when done
 - **Text-to-speech** — HD and Fast voice modes (DragonHD / Neural) with streaming playback
+- **Streaming LLM→TTS** — AI responses start speaking on the first complete sentence instead of waiting for the full reply
+- **Continuous STT session** — in loop mode, the recorder and WebSocket stay alive across cycles (no restart overhead)
 - **Voice quality toggle** — switch between HD (DragonHD, eastus) and Fast (Neural, westus) modes via `Super+Alt+V` or the panel menu
 - **Keyboard shortcuts** — `Super+Alt+Space` (listen), `Super+Alt+C` (speak clipboard), `Super+Alt+R` (read selection), `Super+Alt+V` (toggle voice quality)
 - **Dictation mode** — transcribed text is typed at the cursor position via ydotool (Wayland) or xdotool (X11)
@@ -36,6 +74,53 @@ GNOME Shell process                    Background service
 ```
 
 The extension runs inside GNOME Shell's process and handles only UI. All network calls, audio I/O, and speech processing happen in a separate Python service communicating over the session D-Bus. Live typing uses ydotool (or xdotool) to inject keystrokes via `/dev/uinput`, bypassing Wayland's input restrictions.
+
+## Modes
+
+GNOME Speaks has several modes that can be combined for different workflows:
+
+### Type Mode (default)
+
+Click the badge or press `Super+Alt+Space` → speak → text is typed at the cursor position. Click again, say "over", or pause for silence to stop. The transcription appears character-by-character as you speak (live typing via ydotool).
+
+### AI Mode
+
+Enable via the panel menu or preferences. Your speech is sent to an LLM (Claude, GPT, Gemini, etc.) and the response is spoken aloud. With streaming LLM→TTS, speech starts on the first complete sentence — you don't wait for the full reply.
+
+### Continuous Dictation (Loop)
+
+Enable via the panel menu. After each pause, listening automatically restarts. Works in both Type and AI modes:
+
+- **Type + Loop**: Speak continuously — each utterance is typed, then listening restarts. The recorder and WebSocket session stay alive across cycles (no restart overhead).
+- **AI + Loop (Hands-Free)**: Speak → AI responds → auto-listens again. Full voice assistant loop.
+
+The `loop_silence_timeout` setting (default 1.2s) controls how quickly each cycle ends on silence — shorter values mean faster turnaround.
+
+### Terminal Mode
+
+All lowercase, no auto-capitalization or punctuation. Uses Azure's lexical output for code and terminal input. AI-generated terminal commands are pasted via clipboard (not ydotool) to avoid character drops.
+
+### Talk Mode (D-Bus API)
+
+A programmatic interface for external applications. An app calls `org.gnome.Speaks.Talk(text)` over D-Bus, which:
+
+1. **Speaks** the provided text aloud (TTS)
+2. **Listens** for the user's spoken reply (STT)
+3. **Returns** the transcribed reply as a string
+
+The D-Bus call blocks until the user responds. Used by Claude Code, Copilot CLI, and MCP servers to have voice conversations through GNOME Speaks. The `talk_silence_timeout` (default 4.0s) controls how long it waits for a reply.
+
+### Half-Duplex vs Full-Duplex
+
+This is an audio routing concern, not a mode:
+
+- **Full duplex** (headphones): TTS plays while the recorder is already prewarmed. The mic won't pick up speaker output, so listening can start immediately.
+- **Half duplex** (speakers): TTS must finish completely before the mic opens, otherwise it would transcribe the speaker output as speech. A 0.5s drain buffer is added after TTS ends.
+- **Auto** (default): Detects whether audio is going to speakers or headphones and sets duplex mode accordingly.
+
+### Notification Reader
+
+Automatically reads GNOME desktop notifications aloud as they arrive.
 
 ## Requirements
 
@@ -158,11 +243,14 @@ All shortcuts are configurable in the extension preferences.
 The service is optimized for low-latency voice interaction:
 
 - **Prewarmed connections** — recorder process, STT WebSocket, and TTS HTTP session are kept alive between uses
+- **Continuous STT session** — in loop mode, the recorder and WebSocket stay alive across multiple utterances (no per-cycle restart)
+- **Streaming LLM→TTS** — SSE token streaming with sentence boundary detection; TTS starts on the first complete sentence
 - **Inline noise calibration** — audio frames are sent to Azure while calibrating (no blocking delay)
 - **WebSocket reuse** — persistent STT connection saves ~230ms per utterance
 - **Numpy RMS fast-path** — SIMD-vectorized audio energy calculation (~5-10x faster)
 - **Diff-aware live typing** — only erases and retypes the changed suffix of each partial hypothesis
 - **ydotool daemon mode** — with ydotoold, keystroke injection is sub-millisecond (no uinput device churn)
+- **Loop silence timeout** — configurable 1.2s (vs 3.0s single-shot) for fast cycle turnaround
 
 ## Service management
 

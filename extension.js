@@ -171,8 +171,11 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _enable() {
+        this._destroyed = false;
         this._state = States.IDLE;
         this._proxy = null;
+        this._proxyReady = false;
+        this._proxyPending = false;
         this._proxySignals = [];
         this._signals = [];
         this._timeouts = [];
@@ -184,6 +187,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._dragBadgeStartY = 0;
         this._badgeVisible = true;
         this._audioLevel = 0;
+        this._lastAudioLevelTime = 0;
         this._settings = this.getSettings();
 
         // Restore persisted badge position
@@ -206,13 +210,15 @@ export default class GnomeSpeaksExtension extends Extension {
             DBUS_NAME,
             Gio.BusNameWatcherFlags.NONE,
             () => {
+                if (this._destroyed) return;
                 // Name appeared (service started or restarted)
-                if (this._proxy)
+                if (this._proxyReady)
                     this._syncState();
-                else
+                else if (!this._proxyPending)
                     this._initProxy();
             },
             () => {
+                if (this._destroyed) return;
                 // Name vanished (service stopped) — reset badge to idle
                 this._setState(States.IDLE);
             },
@@ -228,6 +234,8 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _disable() {
+        this._destroyed = true;
+
         if (this._busWatchId) {
             Gio.bus_unwatch_name(this._busWatchId);
             this._busWatchId = 0;
@@ -243,6 +251,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._destroyBadge();
 
         this._state = null;
+        this._proxyReady = false;
         this._settings = null;
     }
 
@@ -385,18 +394,14 @@ export default class GnomeSpeaksExtension extends Extension {
         this._qualityPill = this._createPill('✦', 'gnome-speaks-quality-hd', () => this._toggleVoiceQuality());
         this._modePill = this._createPill('✏️', 'gnome-speaks-mode-dict', () => this._toggleMode());
         this._continuousPill = this._createPill('🔄', 'gnome-speaks-pill-off', () => this._toggleContinuous());
-        this._handsFreePill = this._createPill('🙌', 'gnome-speaks-pill-off', () => this._toggleHandsFree());
-        this._bargeInPill = this._createPill('⏸', 'gnome-speaks-pill-off', () => this._toggleBargeIn());
         this._terminalPill = this._createPill('>', 'gnome-speaks-pill-off', () => this._toggleTerminal());
 
         this._badge.add_child(this._qualityPill);
         this._badge.add_child(this._modePill);
         this._badge.add_child(this._continuousPill);
-        this._badge.add_child(this._handsFreePill);
-        this._badge.add_child(this._bargeInPill);
         this._badge.add_child(this._terminalPill);
 
-        this._pills = [this._qualityPill, this._modePill, this._continuousPill, this._handsFreePill, this._bargeInPill, this._terminalPill];
+        this._pills = [this._qualityPill, this._modePill, this._continuousPill, this._terminalPill];
         for (let pill of this._pills)
             pill.hide();
 
@@ -693,8 +698,6 @@ export default class GnomeSpeaksExtension extends Extension {
         this._qualityPill = null;
         this._modePill = null;
         this._continuousPill = null;
-        this._handsFreePill = null;
-        this._bargeInPill = null;
         this._terminalPill = null;
         this._pills = null;
     }
@@ -768,15 +771,9 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         menu.addMenuItem(this._menuContinuousToggle);
 
-        this._menuHandsFreeToggle = new PopupMenu.PopupSwitchMenuItem('Hands-Free', false);
-        this._menuHandsFreeToggle.connect('toggled', () => {
-            this._callMethod('ToggleHandsFree');
-        });
-        menu.addMenuItem(this._menuHandsFreeToggle);
-
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Voice & Audio'));
 
-        this._voiceQuality = 'hd';
+        this._voiceQuality = 'fast';
         this._menuVoiceQualityItem = new PopupMenu.PopupMenuItem('Voice: HD');
         this._menuVoiceQualityItem.connect('activate', () => this._toggleVoiceQuality());
         menu.addMenuItem(this._menuVoiceQualityItem);
@@ -861,7 +858,6 @@ export default class GnomeSpeaksExtension extends Extension {
             this._menuBadgeToggle = null;
             this._menuContinuousToggle = null;
             this._menuConversationToggle = null;
-            this._menuHandsFreeToggle = null;
             this._menuVoiceQualityItem = null;
             this._menuAudioInfoItem = null;
             this._langSubMenu = null;
@@ -924,24 +920,33 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _initProxy() {
+        if (this._proxyPending) return;
+        this._proxyPending = true;
         try {
-            this._proxy = new GnomeSpeaksProxy(
+            let p = new GnomeSpeaksProxy(
                 Gio.DBus.session,
                 DBUS_NAME,
                 DBUS_PATH,
                 (proxy, error) => {
+                    this._proxyPending = false;
+                    if (this._destroyed) return;
                     if (error) {
                         log(`[GNOME Speaks] DBus proxy creation failed: ${error.message}`);
                         this._proxy = null;
+                        this._proxyReady = false;
                         return;
                     }
+                    this._proxy = p;
+                    this._proxyReady = true;
                     this._connectProxySignals();
                     this._syncState();
                 }
             );
         } catch (e) {
             log(`[GNOME Speaks] Failed to create DBus proxy: ${e.message}`);
+            this._proxyPending = false;
             this._proxy = null;
+            this._proxyReady = false;
         }
     }
 
@@ -976,6 +981,8 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _disconnectProxy() {
+        this._proxyReady = false;
+        this._proxyPending = false;
         if (this._proxy) {
             for (let sigId of this._proxySignals) {
                 try {
@@ -990,11 +997,11 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _syncState() {
-        if (!this._proxy)
+        if (!this._proxy || this._destroyed)
             return;
 
         this._proxy.GetStateRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (error) {
                 log(`[GNOME Speaks] GetState failed: ${error.message}`);
                 return;
@@ -1005,7 +1012,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync voice quality pill + menu label
         this._proxy.GetVoiceQualityRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (!error && result && result[0]) {
                 this._voiceQuality = result[0];
                 this._updateQualityPill();
@@ -1017,7 +1024,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync audio device info
         this._proxy.GetAudioInfoRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (!error && result && result[0]) {
                 try {
                     let info = JSON.parse(result[0]);
@@ -1030,7 +1037,7 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Sync mode states from service
         this._proxy.GetConversationModeRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (!error && result) {
                 this._conversationMode = result[0];
                 this._updateModePill();
@@ -1039,7 +1046,7 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         });
         this._proxy.GetContinuousDictationRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (!error && result) {
                 this._continuousMode = result[0];
                 this._updateContinuousPill();
@@ -1047,24 +1054,8 @@ export default class GnomeSpeaksExtension extends Extension {
                     this._menuContinuousToggle.setToggleState(this._continuousMode);
             }
         });
-        this._proxy.GetHandsFreeRemote((result, error) => {
-            if (!this._proxy) return;
-            if (!error && result) {
-                this._handsFreeMode = result[0];
-                this._updateHandsFreePill();
-                if (this._menuHandsFreeToggle)
-                    this._menuHandsFreeToggle.setToggleState(this._handsFreeMode);
-            }
-        });
-        this._proxy.GetBargeInRemote((result, error) => {
-            if (!this._proxy) return;
-            if (!error && result) {
-                this._bargeInMode = result[0];
-                this._updateBargeInPill();
-            }
-        });
         this._proxy.GetTerminalModeRemote((result, error) => {
-            if (!this._proxy) return;
+            if (this._destroyed || !this._proxy) return;
             if (!error && result) {
                 this._terminalMode = result[0];
                 this._updateTerminalPill();
@@ -1073,7 +1064,10 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _setState(newState) {
+        if (this._destroyed) return;
         if (!Object.values(States).includes(newState))
+            return;
+        if (this._state === newState)
             return;
 
         let oldState = this._state;
@@ -1113,8 +1107,6 @@ export default class GnomeSpeaksExtension extends Extension {
         this._updateQualityPill();
         this._updateModePill();
         this._updateContinuousPill();
-        this._updateHandsFreePill();
-        this._updateBargeInPill();
         this._updateTerminalPill();
 
         // Update panel icon and menu
@@ -1177,7 +1169,7 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _doPulse() {
-        if (!this._badge || !this._pulseActive)
+        if (this._destroyed || !this._badge || !this._pulseActive)
             return;
 
         let targetScale = this._pulseUp ? 1.06 : 1.0;
@@ -1349,9 +1341,16 @@ export default class GnomeSpeaksExtension extends Extension {
     // -- Audio level visualization -----------------------------------------
 
     _onAudioLevel(level) {
+        if (this._destroyed) return;
         this._audioLevel = level;
         if (!this._badge || (this._state !== States.LISTENING && this._state !== States.SPEAKING))
             return;
+
+        // Throttle to ~12fps to avoid flooding the animation system
+        let now = GLib.get_monotonic_time();
+        if ((now - this._lastAudioLevelTime) < 80000) // 80ms
+            return;
+        this._lastAudioLevelTime = now;
 
         // Scale the badge slightly based on audio level for visual feedback
         let baseScale = 1.0;

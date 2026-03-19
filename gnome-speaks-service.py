@@ -529,7 +529,7 @@ class GnomeSpeaksService:
         self._connection = None
 
         # Voice quality toggle (hd = DragonHD + eastus, fast = Neural + westus)
-        self._voice_quality = "hd"
+        self._voice_quality = "fast"
         self._original_tts_region = CONFIG.get("tts_region")
         self._original_tts_key = CONFIG.get("tts_key")
 
@@ -727,7 +727,7 @@ class GnomeSpeaksService:
             _schedule_warmup()
 
             if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
-                GLib.idle_add(lambda: self.start_listening() or False)
+                GLib.idle_add(lambda: self.start_listening() if CONFIG.get("continuous_dictation", False) else False)
         except Exception as exc:
             log.exception("Batch STT (%s) failed: %s", mode, exc)
             GLib.idle_add(self._emit_error, f"STT failed: {exc}")
@@ -1049,7 +1049,7 @@ class GnomeSpeaksService:
         # set (silence/VAD ended recording). Skip restart only when the user
         # explicitly stopped (stop_listening/stop set _stop_event without turn_end).
         if user_text and CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
-            GLib.idle_add(lambda: self.start_listening() or False)
+            GLib.idle_add(lambda: self.start_listening() if CONFIG.get("continuous_dictation", False) else False)
 
     def stop_listening(self):
         """Stop recording but keep accumulated text. Returns transcription."""

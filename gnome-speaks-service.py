@@ -1585,8 +1585,39 @@ class GnomeSpeaksService:
         speak_text = re.sub(r'\s{2,}', ' ', speak_text)
         return type_text, speak_text
 
-    def _conversation_worker(self, user_text):
-        """Send transcribed text to an LLM and speak the response."""
+    # -- Sentence splitting for streaming TTS ------------------------------
+
+    _SENTENCE_BOUNDARY_RE = re.compile(
+        r'(?<=[.!?])'   # lookbehind for sentence-ending punctuation
+        r'(?:\s+|$)'    # followed by whitespace or end-of-string
+    )
+
+    def _split_sentences(self, buffer):
+        """Split buffer into (complete_sentences_list, remaining_buffer).
+
+        A sentence is considered complete when it ends with . ! or ?
+        followed by whitespace (or end of string, but only if the stream
+        has finished — callers should only pass is_final=True at the end).
+        Returns (list_of_sentences, leftover_buffer).
+        """
+        parts = self._SENTENCE_BOUNDARY_RE.split(buffer)
+        # Filter out empty strings from split
+        parts = [p for p in parts if p.strip()]
+        if len(parts) <= 1:
+            return [], buffer  # no complete sentence yet
+        # All but the last part are complete sentences
+        complete = parts[:-1]
+        remaining = parts[-1]
+        return complete, remaining
+
+    # -- Streaming LLM response with incremental TTS ----------------------
+
+    def _stream_conversation_worker(self, user_text):
+        """Stream LLM response and start TTS on each complete sentence.
+
+        Falls back to the synchronous path for providers that don't support
+        streaming (cloud-chat-assistant/bedrock).
+        """
         try:
             import requests as http_requests
 
@@ -1594,17 +1625,11 @@ class GnomeSpeaksService:
             provider = CONFIG.get("llm_provider", "anthropic")
             model = CONFIG.get("llm_model", "claude-opus-4-6")
 
-            # Build system prompt with dynamic context + conversation history
             system_prompt, history = self._build_context(user_text)
 
-            reply = None
+            # --- Build streaming request per provider ---
 
-            if provider in ("cloud-chat-assistant", "bedrock"):
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(history)
-                messages.append({"role": "user", "content": user_text})
-                reply = self._call_cloud_chat_assistant(messages, model)
-            elif provider == "anthropic":
+            if provider == "anthropic":
                 if not api_key:
                     GLib.idle_add(self._emit_error, "No Anthropic API key configured")
                     self._set_state("idle")
@@ -1622,12 +1647,14 @@ class GnomeSpeaksService:
                         "max_tokens": 1024,
                         "system": system_prompt,
                         "messages": msgs,
+                        "stream": True,
                     },
-                    timeout=30,
+                    timeout=60,
+                    stream=True,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                reply = data.get("content", [{}])[0].get("text", "") if data.get("content") else ""
+                token_iter = self._iter_anthropic_tokens(resp)
+
             elif provider == "openai":
                 if not api_key:
                     GLib.idle_add(self._emit_error, "No OpenAI API key configured")
@@ -1642,12 +1669,18 @@ class GnomeSpeaksService:
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={"model": model, "messages": msgs, "max_tokens": 1024},
-                    timeout=30,
+                    json={
+                        "model": model,
+                        "messages": msgs,
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                    timeout=60,
+                    stream=True,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                reply = data.get("choices", [{}])[0].get("message", {}).get("content", "") if data.get("choices") else ""
+                token_iter = self._iter_openai_tokens(resp)
+
             elif provider == "azure":
                 cca_config = self._load_cca_config()
                 azure_key = cca_config.get("api_key", "")
@@ -1669,18 +1702,19 @@ class GnomeSpeaksService:
                 ]
                 if model in serverless:
                     url = f"{endpoint}/models/chat/completions?api-version=2024-12-01-preview"
-                    body = {"model": model, "messages": msgs, "max_tokens": 1024}
+                    body = {"model": model, "messages": msgs, "max_tokens": 1024, "stream": True}
                 else:
                     url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview"
-                    body = {"messages": msgs, "max_tokens": 1024}
+                    body = {"messages": msgs, "max_tokens": 1024, "stream": True}
                 resp = http_requests.post(
                     url,
                     headers={"api-key": azure_key, "Content-Type": "application/json"},
-                    json=body, timeout=30,
+                    json=body, timeout=60,
+                    stream=True,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                reply = data.get("choices", [{}])[0].get("message", {}).get("content", "") if data.get("choices") else ""
+                token_iter = self._iter_openai_tokens(resp)  # Azure uses OpenAI SSE format
+
             elif provider == "google":
                 cca_config = self._load_cca_config()
                 google_key = cca_config.get("google_api_key", "")
@@ -1688,13 +1722,13 @@ class GnomeSpeaksService:
                     GLib.idle_add(self._emit_error, "Google API key not configured")
                     self._set_state("idle")
                     return
-                # Convert history to Google format
                 contents = []
                 for msg in history:
                     role = "model" if msg["role"] == "assistant" else "user"
                     contents.append({"role": role, "parts": [{"text": msg["content"]}]})
                 contents.append({"role": "user", "parts": [{"text": user_text}]})
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={google_key}"
+                url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                       f"{model}:streamGenerateContent?alt=sse&key={google_key}")
                 resp = http_requests.post(
                     url,
                     headers={"Content-Type": "application/json"},
@@ -1702,11 +1736,225 @@ class GnomeSpeaksService:
                         "system_instruction": {"parts": [{"text": system_prompt}]},
                         "contents": contents,
                     },
-                    timeout=30,
+                    timeout=60,
+                    stream=True,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                reply = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                token_iter = self._iter_google_tokens(resp)
+
+            else:
+                GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
+                self._set_state("idle")
+                return
+
+            # --- Consume token stream, buffer sentences, speak incrementally ---
+
+            full_reply = []     # all tokens for conversation history
+            buffer = ""         # accumulates tokens until sentence boundary
+            in_type_tag = False # True while inside <type>...</type>
+            first_sentence = True
+            spoke_anything = False
+
+            for token in token_iter:
+                if self._stop_event.is_set():
+                    log.info("Streaming aborted — stop event set")
+                    break
+                full_reply.append(token)
+
+                # Track <type> tag state so we don't speak tagged content.
+                # Accumulate tagged content silently; it gets pasted at the end.
+                pending = token
+                while pending:
+                    if in_type_tag:
+                        close_idx = pending.find("</type>")
+                        if close_idx >= 0:
+                            # End of type tag — skip content, resume after
+                            in_type_tag = False
+                            pending = pending[close_idx + 7:]
+                        else:
+                            # Still inside type tag — consume entirely
+                            pending = ""
+                    else:
+                        open_idx = pending.find("<type>")
+                        if open_idx >= 0:
+                            # Text before the tag is speakable
+                            buffer += pending[:open_idx]
+                            in_type_tag = True
+                            pending = pending[open_idx + 6:]
+                        else:
+                            # Check for partial "<type" at end of pending
+                            # to avoid speaking an incomplete tag opener
+                            partial = ""
+                            for i in range(1, min(6, len(pending) + 1)):
+                                if "<type>"[:i] == pending[-i:]:
+                                    partial = pending[-i:]
+                                    pending = pending[:-i]
+                                    break
+                            buffer += pending
+                            # Put partial back — next token will complete it
+                            # or it will be flushed as text
+                            buffer += partial
+                            pending = ""
+
+                # Check for complete sentences in the buffer
+                sentences, buffer = self._split_sentences(buffer)
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+
+                    if first_sentence:
+                        # Transition to speaking state on first sentence
+                        self._set_state("speaking")
+                        state._cancel_event.clear()
+                        # On headphones, prewarm recorder during TTS
+                        if not CONFIG.get("half_duplex", False):
+                            _schedule_warmup()
+                        first_sentence = False
+
+                    spoke_anything = True
+                    log.info("Streaming TTS sentence: %s", sentence[:80])
+                    GLib.idle_add(self._emit_partial_transcription, sentence)
+                    speech_tts.tts(sentence, quality=self._voice_quality,
+                                   audio_level_cb=self._tts_level_cb)
+
+                    if self._stop_event.is_set():
+                        break
+
+            # Speak any remaining buffered text after stream ends
+            remainder = buffer.strip()
+            if remainder and not self._stop_event.is_set():
+                if first_sentence:
+                    self._set_state("speaking")
+                    state._cancel_event.clear()
+                    if not CONFIG.get("half_duplex", False):
+                        _schedule_warmup()
+                    first_sentence = False
+                spoke_anything = True
+                log.info("Streaming TTS remainder: %s", remainder[:80])
+                GLib.idle_add(self._emit_partial_transcription, remainder)
+                speech_tts.tts(remainder, quality=self._voice_quality,
+                               audio_level_cb=self._tts_level_cb)
+
+            # --- Post-stream: history, type tags, state transitions ---
+
+            reply = "".join(full_reply)
+            if reply:
+                with self._conversation_lock:
+                    self._conversation_history.append({"role": "user", "content": user_text})
+                    self._conversation_history.append({"role": "assistant", "content": reply})
+
+                # Handle <type> tags from accumulated reply (terminal mode)
+                type_text, _speak_text = self._parse_type_tags(reply)
+                if type_text:
+                    log.info("Typing %d chars at cursor (from streamed reply)", len(type_text))
+                    _clipboard_paste(type_text)
+
+            # Half-duplex drain
+            if spoke_anything and CONFIG.get("half_duplex", False):
+                time.sleep(0.5)
+
+            self._set_state("idle")
+            self._maybe_loop_restart()
+
+        except Exception as exc:
+            log.exception("Streaming conversation failed: %s", exc)
+            GLib.idle_add(self._emit_error, f"LLM error: {exc}")
+            self._set_state("idle")
+
+    # -- SSE token iterators per provider ----------------------------------
+
+    def _iter_anthropic_tokens(self, resp):
+        """Yield text tokens from Anthropic SSE stream."""
+        for line in resp.iter_lines(decode_unicode=True):
+            if self._stop_event.is_set():
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]  # strip "data: " prefix
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if event.get("type") == "content_block_delta":
+                text = event.get("delta", {}).get("text", "")
+                if text:
+                    yield text
+
+    def _iter_openai_tokens(self, resp):
+        """Yield text tokens from OpenAI/Azure SSE stream."""
+        for line in resp.iter_lines(decode_unicode=True):
+            if self._stop_event.is_set():
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            choices = event.get("choices", [])
+            if choices:
+                text = choices[0].get("delta", {}).get("content", "")
+                if text:
+                    yield text
+
+    def _iter_google_tokens(self, resp):
+        """Yield text tokens from Google Gemini SSE stream."""
+        for line in resp.iter_lines(decode_unicode=True):
+            if self._stop_event.is_set():
+                break
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            # Gemini streaming format: candidates[0].content.parts[0].text
+            candidates = event.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    text = parts[0].get("text", "")
+                    if text:
+                        yield text
+
+    # -- Conversation worker (delegates to streaming when possible) --------
+
+    def _conversation_worker(self, user_text):
+        """Send transcribed text to an LLM and speak the response."""
+        provider = CONFIG.get("llm_provider", "anthropic")
+
+        # Streaming is supported for direct API providers.
+        # cloud-chat-assistant/bedrock use an async call_llm that doesn't
+        # support streaming, so fall back to the synchronous path.
+        if provider in ("anthropic", "openai", "azure", "google"):
+            return self._stream_conversation_worker(user_text)
+
+        # --- Synchronous fallback for cloud-chat-assistant / bedrock ---
+        try:
+            import requests as http_requests
+
+            api_key = CONFIG.get("llm_api_key", "")
+            model = CONFIG.get("llm_model", "claude-opus-4-6")
+
+            # Build system prompt with dynamic context + conversation history
+            system_prompt, history = self._build_context(user_text)
+
+            reply = None
+
+            if provider in ("cloud-chat-assistant", "bedrock"):
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(history)
+                messages.append({"role": "user", "content": user_text})
+                reply = self._call_cloud_chat_assistant(messages, model)
             else:
                 GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
                 self._set_state("idle")

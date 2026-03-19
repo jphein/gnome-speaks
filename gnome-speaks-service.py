@@ -902,8 +902,8 @@ class GnomeSpeaksService:
                     silence_frames = 0
                     speech_frames = 0
                     total_frames = 0
-                    # In loop mode, use tighter silence timeout (1.2s vs 3.0s)
-                    silence_sec = 1.2 if is_loop else state.SILENCE_TIMEOUT
+                    # In loop mode, use tighter silence timeout for faster turnaround
+                    silence_sec = CONFIG.get("loop_silence_timeout", 1.2) if is_loop else state.SILENCE_TIMEOUT
                     max_silence = int(silence_sec * 1000 / FRAME_MS)
                     max_no_speech = int(state.NO_SPEECH_TIMEOUT * 1000 / FRAME_MS)
                     min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)

@@ -165,6 +165,10 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addPasswordRow(aiGroup, 'LLM API Key', 'llm_api_key',
             'API key for the selected LLM provider');
 
+        this._addEntryRow(aiGroup, 'System Prompt', 'llm_system_prompt',
+            'You are a helpful voice assistant. Keep responses concise and conversational.',
+            'Instructions for the LLM persona');
+
         // ── Continuous Dictation ──
         const contGroup = new Adw.PreferencesGroup({
             title: 'Continuous Dictation',
@@ -183,6 +187,10 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addSpinRow(contGroup, 'No Speech Timeout', 'no_speech_timeout',
             1.0, 30.0, 1.0, 0, 7.0,
             'Max seconds to wait for any speech before giving up');
+
+        this._addSpinRow(contGroup, 'Loop Silence Timeout', 'loop_silence_timeout',
+            0.3, 5.0, 0.1, 1, 1.2,
+            'Silence timeout in continuous loop mode (shorter = faster turnaround)');
 
         // ── Barge-in ──
         const bargeGroup = new Adw.PreferencesGroup({
@@ -505,25 +513,6 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             icon_name: 'audio-input-microphone-symbolic',
         });
 
-        // ── Dictation ──
-        const dictGroup = new Adw.PreferencesGroup({
-            title: 'Dictation',
-            description: 'When enabled, transcribed speech is typed at the cursor position using wtype (Wayland) or xdotool (X11). When disabled, text is copied to clipboard only.',
-        });
-        page.add(dictGroup);
-
-        this._addSwitchRow(dictGroup, 'Type at Cursor',
-            'Type transcribed text where the cursor is',
-            'dictation_mode', true);
-
-        this._addSwitchRow(dictGroup, 'Continuous Dictation',
-            'Automatically restart listening after each utterance',
-            'continuous_dictation', false);
-
-        this._addSwitchRow(dictGroup, 'Voice Commands',
-            'Convert spoken punctuation (period, comma, etc.) to characters',
-            'voice_commands', true);
-
         // ── Timing ──
         const timingGroup = new Adw.PreferencesGroup({
             title: 'Timing',
@@ -531,17 +520,9 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(timingGroup);
 
-        this._addSpinRow(timingGroup, 'Silence Timeout', 'silence_timeout',
-            0.5, 10.0, 0.5, 1, 3.0,
-            'Seconds of silence after speech before auto-stop');
-
-        this._addSpinRow(timingGroup, 'No Speech Timeout', 'no_speech_timeout',
-            1.0, 30.0, 1.0, 0, 7.0,
-            'Max seconds to wait for any speech');
-
         this._addSpinRow(timingGroup, 'Talk Silence Timeout', 'talk_silence_timeout',
             0.5, 10.0, 0.5, 1, 4.0,
-            'Silence timeout for talk/converse mode');
+            'Silence timeout for talk/converse mode (D-Bus Talk calls)');
 
         this._addSpinRow(timingGroup, 'Max Record Seconds', 'max_record_seconds',
             5, 300, 5, 0, 120,
@@ -553,9 +534,6 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             description: 'Fine-tune speech detection sensitivity.',
         });
         page.add(detectGroup);
-
-        this._addEntryRow(detectGroup, 'End Word', 'end_word', 'over',
-            'Say this word at the end of a sentence to immediately stop recording. Leave empty to disable.');
 
         this._addSpinRow(detectGroup, 'VAD Aggressiveness', 'vad_aggressiveness',
             0, 3, 1, 0, 3,
@@ -881,16 +859,12 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'Write detailed logs to /tmp/speech-debug.log',
             'debug', false);
 
-        // ── Barge-in ──
+        // ── Barge-in Details ──
         const bargeGroup = new Adw.PreferencesGroup({
-            title: 'Barge-in (Experimental)',
-            description: 'Allow your voice to interrupt TTS playback.',
+            title: 'Barge-in Details',
+            description: 'Fine-tune barge-in behavior (enable on the Modes page).',
         });
         page.add(bargeGroup);
-
-        this._addSwitchRow(bargeGroup, 'Enable Barge-in',
-            'Pause TTS when you start speaking',
-            'enable_barge_in', false);
 
         this._addSpinRow(bargeGroup, 'Barge-in Frames', 'barge_in_frames',
             1, 20, 1, 0, 3,
@@ -903,78 +877,6 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addSwitchRow(bargeGroup, 'Barge-in Chime',
             'Play chime when barge-in is detected',
             'chime_barge_in', true);
-
-        // ── Conversation Mode ──
-        const convGroup = new Adw.PreferencesGroup({
-            title: 'Conversation Mode',
-            description: 'Voice chat: your speech is sent to an LLM, and the response is spoken back.',
-        });
-        page.add(convGroup);
-
-        this._addSwitchRow(convGroup, 'Enable Conversation Mode',
-            'Send transcriptions to LLM and speak the response',
-            'conversation_mode', false);
-
-        this._addComboRow(convGroup, 'LLM Provider', 'llm_provider', [
-            ['anthropic', 'Anthropic (Claude API)'],
-            ['openai', 'OpenAI (GPT API)'],
-            ['azure', 'Azure AI Foundry'],
-            ['bedrock', 'AWS Bedrock'],
-            ['google', 'Google Vertex AI'],
-            ['cloud-chat-assistant', 'Cloud Chat Assistant (all providers)'],
-        ], 'anthropic');
-
-        this._addPasswordRow(convGroup, 'LLM API Key', 'llm_api_key',
-            'API key for the selected LLM provider');
-
-        this._addComboRow(convGroup, 'LLM Model', 'llm_model', [
-            // Anthropic (Direct API)
-            ['claude-opus-4-6', 'Claude Opus 4.6'],
-            ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
-            ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5'],
-            // OpenAI (Direct API)
-            ['gpt-4o', 'GPT-4o'],
-            ['gpt-4o-mini', 'GPT-4o Mini'],
-            ['o1', 'o1'],
-            ['o4-mini', 'o4-mini'],
-            ['o3-mini', 'o3-mini'],
-            ['gpt-5.3-chat', 'GPT-5.3 Chat'],
-            // Azure AI Foundry (Serverless)
-            ['grok-3', 'Grok-3 (xAI)'],
-            ['grok-3-mini', 'Grok-3 Mini (xAI)'],
-            ['DeepSeek-R1', 'DeepSeek R1'],
-            ['Meta-Llama-3.1-405B-Instruct', 'Llama 3.1 405B'],
-            ['Llama-3.3-70B-Instruct', 'Llama 3.3 70B'],
-            ['Llama-4-Scout-17B-16E-Instruct', 'Llama 4 Scout 17B'],
-            ['Phi-4', 'Phi-4 (Microsoft)'],
-            ['Codestral-2501', 'Codestral 2501 (Mistral)'],
-            // AWS Bedrock
-            ['claude-opus-4.6', 'Claude Opus 4.6 (Bedrock)'],
-            ['claude-sonnet-4.6', 'Claude Sonnet 4.6 (Bedrock)'],
-            ['nova-pro', 'Amazon Nova Pro'],
-            ['nova-lite', 'Amazon Nova Lite'],
-            ['llama4-maverick-17b', 'Llama 4 Maverick 17B (Bedrock)'],
-            ['palmyra-x5', 'Palmyra X5 (Writer)'],
-            // Google Vertex AI
-            ['gemini-2.5-flash', 'Gemini 2.5 Flash'],
-            ['gemini-2.5-pro', 'Gemini 2.5 Pro'],
-            ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro Preview'],
-        ], 'claude-opus-4-6');
-
-        this._addEntryRow(convGroup, 'System Prompt', 'llm_system_prompt',
-            'You are a helpful voice assistant. Keep responses concise and conversational.',
-            'Instructions for the LLM persona');
-
-        // ── Notification Reader ──
-        const notifGroup = new Adw.PreferencesGroup({
-            title: 'Notification Reader',
-            description: 'Automatically read GNOME notifications aloud.',
-        });
-        page.add(notifGroup);
-
-        this._addSwitchRow(notifGroup, 'Read Notifications',
-            'Speak notification titles and body text as they arrive',
-            'read_notifications', false);
 
         // ── Auto-Corrections ──
         const correctGroup = new Adw.PreferencesGroup({

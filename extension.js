@@ -432,28 +432,9 @@ export default class GnomeSpeaksExtension extends Extension {
 
             if (!this._isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
                 this._isDragging = true;
-                // Capture events at stage level so drag continues when
-                // the cursor moves outside the badge bounds
-                this._dragStageMotionId = global.stage.connect('motion-event', (_actor, stageEvent) => {
-                    if (!this._isDragging) return Clutter.EVENT_PROPAGATE;
-                    let [sx, sy] = stageEvent.get_coords();
-                    let ddx = sx - this._dragStartX;
-                    let ddy = sy - this._dragStartY;
-                    this._badge.set_position(
-                        this._dragBadgeStartX + ddx,
-                        this._dragBadgeStartY + ddy
-                    );
-                    this._customPosition = {x: this._badge.x, y: this._badge.y};
-                    if (this._settings) {
-                        this._settings.set_int('badge-position-x', Math.round(this._badge.x));
-                        this._settings.set_int('badge-position-y', Math.round(this._badge.y));
-                    }
-                    return Clutter.EVENT_STOP;
-                });
-                this._dragStageReleaseId = global.stage.connect('button-release-event', () => {
-                    this._endDrag();
-                    return Clutter.EVENT_STOP;
-                });
+                // Grab all input so drag continues even when cursor
+                // leaves the badge bounds
+                this._dragGrab = global.stage.grab(this._badge);
             }
 
             if (this._isDragging) {
@@ -471,16 +452,15 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._signals.push({obj: this._badge, id: motionId});
 
-        let releaseId = this._badge.connect('button-release-event', (actor, event) => {
-            if (event.get_button() !== 1)
-                return Clutter.EVENT_PROPAGATE;
-
+        let releaseId = this._badge.connect('button-release-event', () => {
+            // Always end drag state on any release — the grab routes
+            // all events here, so we must unconditionally clean up
+            let wasDragging = this._isDragging;
             this._endDrag();
 
-            if (!this._isDragging) {
+            if (!wasDragging) {
                 this._onBadgeClicked();
             }
-            this._isDragging = false;
             return Clutter.EVENT_STOP;
         });
         this._signals.push({obj: this._badge, id: releaseId});
@@ -493,13 +473,10 @@ export default class GnomeSpeaksExtension extends Extension {
 
     _endDrag() {
         this._dragButton = 0;
-        if (this._dragStageMotionId) {
-            global.stage.disconnect(this._dragStageMotionId);
-            this._dragStageMotionId = null;
-        }
-        if (this._dragStageReleaseId) {
-            global.stage.disconnect(this._dragStageReleaseId);
-            this._dragStageReleaseId = null;
+        this._isDragging = false;
+        if (this._dragGrab) {
+            this._dragGrab.dismiss();
+            this._dragGrab = null;
         }
     }
 

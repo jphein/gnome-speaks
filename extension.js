@@ -64,22 +64,10 @@ const DBUS_XML = `
       <arg direction="in" type="s" name="text"/>
       <arg direction="out" type="s" name="reply"/>
     </method>
-    <method name="ToggleBargeIn">
-      <arg direction="out" type="b" name="enabled"/>
-    </method>
-    <method name="GetBargeIn">
-      <arg direction="out" type="b" name="enabled"/>
-    </method>
-    <method name="ToggleHandsFree">
-      <arg direction="out" type="b" name="enabled"/>
-    </method>
     <method name="GetContinuousDictation">
       <arg direction="out" type="b" name="enabled"/>
     </method>
     <method name="GetConversationMode">
-      <arg direction="out" type="b" name="enabled"/>
-    </method>
-    <method name="GetHandsFree">
       <arg direction="out" type="b" name="enabled"/>
     </method>
     <method name="ToggleTerminalMode">
@@ -241,6 +229,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._busWatchId = 0;
         }
 
+        this._endDrag();
         this._cancelAllTimeouts();
         this._stopPulse();
         this._disconnectNotificationReader();
@@ -330,22 +319,30 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _onNotification(notification) {
-        // Only read notifications if enabled in config
-        // Check by reading the speech-to-cli config
-        let configPath = GLib.build_filenamev([
-            GLib.get_home_dir(), '.config', 'speech-to-cli', 'config.json',
-        ]);
-        try {
-            let [ok, contents] = GLib.file_get_contents(configPath);
-            if (ok) {
-                let decoder = new TextDecoder('utf-8');
-                let config = JSON.parse(decoder.decode(contents));
-                if (!config.read_notifications)
-                    return;
+        // Only read notifications if enabled in config.
+        // Cache the config to avoid blocking the compositor with disk I/O
+        // on every notification. Refresh cache at most once per 10 seconds.
+        let now = GLib.get_monotonic_time();
+        if (!this._notifConfigCache || (now - this._notifConfigCacheTime) > 10000000) {
+            let configPath = GLib.build_filenamev([
+                GLib.get_home_dir(), '.config', 'speech-to-cli', 'config.json',
+            ]);
+            try {
+                let [ok, contents] = GLib.file_get_contents(configPath);
+                if (ok) {
+                    let decoder = new TextDecoder('utf-8');
+                    this._notifConfigCache = JSON.parse(decoder.decode(contents));
+                } else {
+                    this._notifConfigCache = {};
+                }
+            } catch (e) {
+                this._notifConfigCache = {};
             }
-        } catch (e) {
-            return;
+            this._notifConfigCacheTime = now;
         }
+
+        if (!this._notifConfigCache.read_notifications)
+            return;
 
         let title = notification.title || '';
         let body = notification.body || '';
@@ -387,8 +384,6 @@ export default class GnomeSpeaksExtension extends Extension {
         // Pills — hidden in idle, shown when active
         this._conversationMode = false;
         this._continuousMode = false;
-        this._handsFreeMode = false;
-        this._bargeInMode = false;
         this._terminalMode = false;
 
         this._qualityPill = this._createPill('✦', 'gnome-speaks-quality-hd', () => this._toggleVoiceQuality());
@@ -435,8 +430,31 @@ export default class GnomeSpeaksExtension extends Extension {
             let dx = stageX - this._dragStartX;
             let dy = stageY - this._dragStartY;
 
-            if (!this._isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5))
+            if (!this._isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
                 this._isDragging = true;
+                // Capture events at stage level so drag continues when
+                // the cursor moves outside the badge bounds
+                this._dragStageMotionId = global.stage.connect('motion-event', (_actor, stageEvent) => {
+                    if (!this._isDragging) return Clutter.EVENT_PROPAGATE;
+                    let [sx, sy] = stageEvent.get_coords();
+                    let ddx = sx - this._dragStartX;
+                    let ddy = sy - this._dragStartY;
+                    this._badge.set_position(
+                        this._dragBadgeStartX + ddx,
+                        this._dragBadgeStartY + ddy
+                    );
+                    this._customPosition = {x: this._badge.x, y: this._badge.y};
+                    if (this._settings) {
+                        this._settings.set_int('badge-position-x', Math.round(this._badge.x));
+                        this._settings.set_int('badge-position-y', Math.round(this._badge.y));
+                    }
+                    return Clutter.EVENT_STOP;
+                });
+                this._dragStageReleaseId = global.stage.connect('button-release-event', () => {
+                    this._endDrag();
+                    return Clutter.EVENT_STOP;
+                });
+            }
 
             if (this._isDragging) {
                 actor.set_position(
@@ -457,7 +475,7 @@ export default class GnomeSpeaksExtension extends Extension {
             if (event.get_button() !== 1)
                 return Clutter.EVENT_PROPAGATE;
 
-            this._dragButton = 0;
+            this._endDrag();
 
             if (!this._isDragging) {
                 this._onBadgeClicked();
@@ -467,18 +485,22 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._signals.push({obj: this._badge, id: releaseId});
 
-        let leaveId = this._badge.connect('leave-event', () => {
-            if (this._dragButton === 1 && this._isDragging) {
-                // Continue drag even if pointer leaves badge momentarily
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
-        this._signals.push({obj: this._badge, id: leaveId});
-
         Main.layoutManager.addTopChrome(this._badge, {
             affectsInputRegion: true,
             trackFullscreen: false,
         });
+    }
+
+    _endDrag() {
+        this._dragButton = 0;
+        if (this._dragStageMotionId) {
+            global.stage.disconnect(this._dragStageMotionId);
+            this._dragStageMotionId = null;
+        }
+        if (this._dragStageReleaseId) {
+            global.stage.disconnect(this._dragStageReleaseId);
+            this._dragStageReleaseId = null;
+        }
     }
 
     _toggleVoiceQuality() {
@@ -566,50 +588,6 @@ export default class GnomeSpeaksExtension extends Extension {
         this._continuousPill.text = on ? '🔄 Loop' : '🔄';
         this._continuousPill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
         this._continuousPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
-    }
-
-    _toggleHandsFree() {
-        if (!this._proxy) {
-            this._handsFreeMode = !this._handsFreeMode;
-            this._updateHandsFreePill();
-            return;
-        }
-        this._proxy.ToggleHandsFreeRemote((result, error) => {
-            if (error) return;
-            this._handsFreeMode = result[0];
-            this._updateHandsFreePill();
-            if (this._menuHandsFreeToggle)
-                this._menuHandsFreeToggle.setToggleState(this._handsFreeMode);
-        });
-    }
-
-    _updateHandsFreePill() {
-        if (!this._handsFreePill) return;
-        let on = this._handsFreeMode;
-        this._handsFreePill.text = on ? '🙌 Free' : '🙌';
-        this._handsFreePill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
-        this._handsFreePill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
-    }
-
-    _toggleBargeIn() {
-        if (!this._proxy) {
-            this._bargeInMode = !this._bargeInMode;
-            this._updateBargeInPill();
-            return;
-        }
-        this._proxy.ToggleBargeInRemote((result, error) => {
-            if (error) return;
-            this._bargeInMode = result[0];
-            this._updateBargeInPill();
-        });
-    }
-
-    _updateBargeInPill() {
-        if (!this._bargeInPill) return;
-        let on = this._bargeInMode;
-        this._bargeInPill.text = on ? '⏸ Barge' : '⏸';
-        this._bargeInPill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
-        this._bargeInPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
     }
 
     _toggleTerminal() {
@@ -806,7 +784,7 @@ export default class GnomeSpeaksExtension extends Extension {
                 } else {
                     this._badge.ease({
                         opacity: 0, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                        onComplete: () => { if (this._badge) this._badge.hide(); },
+                        onComplete: () => { if (!this._destroyed && this._badge) this._badge.hide(); },
                     });
                 }
             }
@@ -868,19 +846,41 @@ export default class GnomeSpeaksExtension extends Extension {
         if (!this._badge)
             return;
 
+        let monitor = Main.layoutManager.primaryMonitor;
+
         if (this._customPosition) {
-            this._badge.set_position(this._customPosition.x, this._customPosition.y);
-            return;
+            // If saved position is within the current monitor, use it.
+            // Otherwise reset to default center-bottom (the user moved it
+            // on a different display config).
+            if (monitor) {
+                let cx = this._customPosition.x;
+                let cy = this._customPosition.y;
+                let inBounds = cx >= monitor.x && cy >= monitor.y
+                    && cx < monitor.x + monitor.width - 20
+                    && cy < monitor.y + monitor.height - 20;
+                if (inBounds) {
+                    this._badge.set_position(cx, cy);
+                    return;
+                }
+                // Out of bounds — fall through to default positioning
+                this._customPosition = null;
+                if (this._settings) {
+                    this._settings.set_int('badge-position-x', -1);
+                    this._settings.set_int('badge-position-y', -1);
+                }
+            } else {
+                this._badge.set_position(this._customPosition.x, this._customPosition.y);
+                return;
+            }
         }
 
-        let monitor = Main.layoutManager.primaryMonitor;
         if (!monitor)
             return;
 
         // We need to wait for the badge to be allocated to get its width
         // Use a small delay to ensure the actor is laid out
         let timeoutId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            if (!this._badge)
+            if (this._destroyed || !this._badge)
                 return GLib.SOURCE_REMOVE;
 
             let badgeWidth = this._badge.get_width();
@@ -1113,6 +1113,24 @@ export default class GnomeSpeaksExtension extends Extension {
         this._updatePanelIcon(newState);
         this._updatePanelMenu();
 
+        // Re-sync mode flags when returning to idle (catches one-shot AI mode).
+        // Debounce: skip if we just synced < 2s ago (avoids D-Bus flood in AI+Loop)
+        if (newState === States.IDLE && this._proxy) {
+            let now = GLib.get_monotonic_time();
+            if (!this._lastModeSyncTime || (now - this._lastModeSyncTime) > 2000000) {
+                this._lastModeSyncTime = now;
+                this._proxy.GetConversationModeRemote((result, error) => {
+                    if (this._destroyed || !this._proxy) return;
+                    if (!error && result) {
+                        this._conversationMode = result[0];
+                        this._updateModePill();
+                        if (this._menuConversationToggle)
+                            this._menuConversationToggle.setToggleState(this._conversationMode);
+                    }
+                });
+            }
+        }
+
         // Reset audio level when leaving listening state
         if (newState !== States.LISTENING)
             this._audioLevel = 0;
@@ -1180,14 +1198,15 @@ export default class GnomeSpeaksExtension extends Extension {
             duration: 800,
             mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
             onComplete: () => {
-                if (!this._pulseActive || !this._badge)
+                if (this._destroyed || !this._pulseActive || !this._badge)
                     return;
                 this._pulseUp = !this._pulseUp;
                 // Schedule next pulse asynchronously to prevent stack overflow
                 // if ease() completes synchronously (e.g., target === current value)
                 this._pulseNextId = GLib.timeout_add(GLib.PRIORITY_LOW, 16, () => {
                     this._pulseNextId = null;
-                    this._doPulse();
+                    if (!this._destroyed)
+                        this._doPulse();
                     return GLib.SOURCE_REMOVE;
                 });
             },
@@ -1198,11 +1217,11 @@ export default class GnomeSpeaksExtension extends Extension {
         this._pulseActive = false;
 
         if (this._pulseNextId) {
-            GLib.Source.remove(this._pulseNextId);
+            try { GLib.Source.remove(this._pulseNextId); } catch (e) { /* already fired */ }
             this._pulseNextId = null;
         }
 
-        if (!this._badge)
+        if (!this._badge || this._destroyed)
             return;
 
         this._badge.remove_all_transitions();
@@ -1227,7 +1246,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._callMethod('Stop');
             break;
         case States.PROCESSING:
-            // No action during processing
+            this._callMethod('Stop');
             break;
         }
     }
@@ -1271,7 +1290,7 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _showPartialTranscription(text) {
-        if (!this._badge || !this._label)
+        if (this._destroyed || !this._badge || !this._label)
             return;
         if (this._state !== 'listening' && this._state !== 'speaking')
             return;
@@ -1305,7 +1324,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._cancelTimeout('transcription');
 
         let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
-            if (!this._badge || !this._label)
+            if (this._destroyed || !this._badge || !this._label)
                 return GLib.SOURCE_REMOVE;
 
             // Only hide if we're still showing transcription (i.e., back to idle)
@@ -1322,7 +1341,7 @@ export default class GnomeSpeaksExtension extends Extension {
     _showError(message) {
         log(`[GNOME Speaks] Error: ${message}`);
 
-        if (!this._badge)
+        if (this._destroyed || !this._badge)
             return;
 
         this._badge.add_style_class_name('gnome-speaks-error');
@@ -1330,7 +1349,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._cancelTimeout('error');
 
         let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
-            if (this._badge)
+            if (!this._destroyed && this._badge)
                 this._badge.remove_style_class_name('gnome-speaks-error');
             this._removeTimeout('error');
             return GLib.SOURCE_REMOVE;
@@ -1352,21 +1371,13 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         this._lastAudioLevelTime = now;
 
-        // Scale the badge slightly based on audio level for visual feedback
+        // Set scale directly (no ease) to avoid conflicting with pulse
+        // animation — concurrent ease() calls on the same property can
+        // cause GL errors on NVIDIA proprietary drivers.
         let baseScale = 1.0;
         let levelBoost = Math.min(level, 1.0) * 0.12;
         let targetScale = baseScale + levelBoost;
-
-        // Only update if pulse isn't actively animating (avoid conflict)
-        if (this._pulseActive) {
-            // Modulate the pulse intensity based on level
-            this._badge.ease({
-                scale_x: targetScale,
-                scale_y: targetScale,
-                duration: 80,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-            });
-        }
+        this._badge.set_scale(targetScale, targetScale);
     }
 
     _showContextMenu(event) {
@@ -1419,7 +1430,7 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._menuBadgeToggle.setToggleState(false);
             this._badge.ease({
                 opacity: 0, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                onComplete: () => { if (this._badge) this._badge.hide(); },
+                onComplete: () => { if (!this._destroyed && this._badge) this._badge.hide(); },
             });
             this._destroyContextMenu();
         });
@@ -1521,7 +1532,7 @@ export default class GnomeSpeaksExtension extends Extension {
     _cancelTimeout(name) {
         let idx = this._timeouts.findIndex(t => t.name === name);
         if (idx >= 0) {
-            GLib.Source.remove(this._timeouts[idx].id);
+            try { GLib.Source.remove(this._timeouts[idx].id); } catch (e) { /* already fired */ }
             this._timeouts.splice(idx, 1);
         }
     }

@@ -20,6 +20,7 @@ HTTP session pooling, VAD, energy-gated silence detection.
 """
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -537,6 +538,39 @@ class GnomeSpeaksService:
         self._conversation_history = []
         self._conversation_lock = threading.Lock()
 
+    # -- Config sync -------------------------------------------------------
+
+    # Boolean flags that prefs.js can change on disk while the service runs.
+    _SYNC_FLAGS = (
+        "conversation_mode", "continuous_dictation", "dictation_mode",
+        "terminal_mode", "skip_final_paste", "read_notifications",
+    )
+
+    def _reload_config_flags(self):
+        """Re-read boolean mode flags from config file so prefs changes take effect."""
+        try:
+            path = os.path.expanduser("~/.config/speech-to-cli/config.json")
+            with open(path) as f:
+                disk = json.load(f)
+            for key in self._SYNC_FLAGS:
+                if key in disk:
+                    CONFIG[key] = disk[key]
+        except Exception:
+            pass  # file missing or malformed — keep current values
+
+    def _save_config_flag(self, key, value):
+        """Write a single flag back to the config file so prefs stays in sync."""
+        CONFIG[key] = value
+        try:
+            path = os.path.expanduser("~/.config/speech-to-cli/config.json")
+            with open(path) as f:
+                disk = json.load(f)
+            disk[key] = value
+            with open(path, "w") as f:
+                json.dump(disk, f, indent=2)
+        except Exception as e:
+            log.warning("Failed to save config flag %s: %s", key, e)
+
     # -- State management --------------------------------------------------
 
     @property
@@ -635,6 +669,7 @@ class GnomeSpeaksService:
 
     def start_listening(self):
         """Start microphone recording with STT. Returns 'ok' or error string."""
+        self._reload_config_flags()
         _refresh_audio_detection()
         if self.current_state != "idle":
             return f"error: busy ({self.current_state})"
@@ -712,7 +747,10 @@ class GnomeSpeaksService:
 
                 if CONFIG.get("conversation_mode", False):
                     self._conversation_worker(user_text)
-                    _schedule_warmup()
+                    # One-shot: turn off after AI responds
+                    if not CONFIG.get("continuous_dictation", False):
+                        self._save_config_flag("conversation_mode", False)
+                    # Warmup + restart already handled inside _conversation_worker
                     return
 
                 if CONFIG.get("dictation_mode", True):
@@ -727,7 +765,10 @@ class GnomeSpeaksService:
             _schedule_warmup()
 
             if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
-                GLib.idle_add(lambda: self.start_listening() if CONFIG.get("continuous_dictation", False) else False)
+                GLib.idle_add(lambda: self.start_listening()
+                              if (CONFIG.get("continuous_dictation", False)
+                                  and not self._stop_event.is_set())
+                              else False)
         except Exception as exc:
             log.exception("Batch STT (%s) failed: %s", mode, exc)
             GLib.idle_add(self._emit_error, f"STT failed: {exc}")
@@ -1012,7 +1053,11 @@ class GnomeSpeaksService:
                     _send_backspaces(len(typed_partial[0]))
                     time.sleep(0.02)
                 self._conversation_worker(user_text)
-                _schedule_warmup()
+                # One-shot: turn off conversation mode AFTER the AI responds,
+                # unless continuous dictation is also on (persistent conversation)
+                if not CONFIG.get("continuous_dictation", False):
+                    self._save_config_flag("conversation_mode", False)
+                # Warmup + restart already handled inside _conversation_worker
                 return
 
             # Type at cursor (dictation mode) or just copy to clipboard
@@ -1049,7 +1094,10 @@ class GnomeSpeaksService:
         # set (silence/VAD ended recording). Skip restart only when the user
         # explicitly stopped (stop_listening/stop set _stop_event without turn_end).
         if user_text and CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
-            GLib.idle_add(lambda: self.start_listening() if CONFIG.get("continuous_dictation", False) else False)
+            GLib.idle_add(lambda: self.start_listening()
+                          if (CONFIG.get("continuous_dictation", False)
+                              and not self._stop_event.is_set())
+                          else False)
 
     def stop_listening(self):
         """Stop recording but keep accumulated text. Returns transcription."""
@@ -1129,7 +1177,11 @@ class GnomeSpeaksService:
                     and CONFIG.get("conversation_mode", False)
                     and not self._stop_event.is_set()):
                 log.info("Hands-free: auto-restarting listening after TTS")
-                GLib.idle_add(lambda: self.start_listening() or False)
+                GLib.idle_add(lambda: self.start_listening()
+                              if (CONFIG.get("continuous_dictation", False)
+                                  and CONFIG.get("conversation_mode", False)
+                                  and not self._stop_event.is_set())
+                              else False)
 
     def speak_clipboard(self):
         """Read clipboard and speak its contents."""
@@ -1228,23 +1280,37 @@ class GnomeSpeaksService:
 
     def toggle_conversation_mode(self):
         current = CONFIG.get("conversation_mode", False)
-        CONFIG["conversation_mode"] = not current
+        self._save_config_flag("conversation_mode", not current)
         if current:
             # Turning off — clear conversation history
             with self._conversation_lock:
                 self._conversation_history.clear()
         log.info("Conversation mode: %s", not current)
+        # If currently listening, restart so live_typing is recalculated.
+        # Signal stop non-blocking, then poll for idle before restarting.
+        if self.current_state == "listening":
+            log.info("Restarting listen for conversation mode change")
+            self._stop_event.set()
+            state.cancel_active()
+            def _restart_when_idle():
+                if self.current_state not in ("idle", "processing"):
+                    return True  # keep polling
+                if self.current_state == "processing":
+                    return True  # still winding down
+                self.start_listening()
+                return False  # stop polling
+            GLib.timeout_add(50, _restart_when_idle)
         return not current
 
     def toggle_continuous_dictation(self):
         current = CONFIG.get("continuous_dictation", False)
-        CONFIG["continuous_dictation"] = not current
+        self._save_config_flag("continuous_dictation", not current)
         log.info("Continuous dictation: %s", not current)
         return not current
 
     def toggle_barge_in(self):
         current = CONFIG.get("enable_barge_in", False)
-        CONFIG["enable_barge_in"] = not current
+        self._save_config_flag("enable_barge_in", not current)
         log.info("Barge-in: %s", not current)
         return not current
 
@@ -1264,7 +1330,7 @@ class GnomeSpeaksService:
 
     def toggle_terminal_mode(self):
         current = CONFIG.get("terminal_mode", False)
-        CONFIG["terminal_mode"] = not current
+        self._save_config_flag("terminal_mode", not current)
         log.info("Terminal mode: %s", not current)
         return not current
 
@@ -1277,15 +1343,15 @@ class GnomeSpeaksService:
         conv = CONFIG.get("conversation_mode", False)
         cont = CONFIG.get("continuous_dictation", False)
         if conv and cont:
-            CONFIG["conversation_mode"] = False
-            CONFIG["continuous_dictation"] = False
+            self._save_config_flag("conversation_mode", False)
+            self._save_config_flag("continuous_dictation", False)
             with self._conversation_lock:
                 self._conversation_history.clear()
             log.info("Hands-free mode: off")
             return False
         else:
-            CONFIG["conversation_mode"] = True
-            CONFIG["continuous_dictation"] = True
+            self._save_config_flag("conversation_mode", True)
+            self._save_config_flag("continuous_dictation", True)
             log.info("Hands-free mode: on")
             return True
 
@@ -1415,6 +1481,7 @@ class GnomeSpeaksService:
     def _build_context(self, user_text):
         """Build system prompt with dynamic context. Returns (system_prompt, history)."""
         from datetime import datetime
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         custom = CONFIG.get("llm_system_prompt", "")
         parts = [custom] if custom else [self._BASE_SYSTEM_PROMPT]
@@ -1435,15 +1502,24 @@ class GnomeSpeaksService:
         if 'time_query' in intents:
             parts.append(f"Current time: {datetime.now().strftime('%I:%M %p, %A %B %d, %Y')}")
 
-        if 'app_context' in intents:
-            app = self._get_focused_app()
-            if app:
-                parts.append(f"Focused application: {app}")
-
-        if 'clipboard' in intents:
-            clip = self._get_clipboard_text()
-            if clip:
-                parts.append(f"Clipboard content: {clip}")
+        # Run subprocess-based context fetches in parallel
+        futures = {}
+        need_app = 'app_context' in intents
+        need_clip = 'clipboard' in intents
+        if need_app or need_clip:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                if need_app:
+                    futures['app'] = pool.submit(self._get_focused_app)
+                if need_clip:
+                    futures['clip'] = pool.submit(self._get_clipboard_text)
+            if 'app' in futures:
+                app = futures['app'].result()
+                if app:
+                    parts.append(f"Focused application: {app}")
+            if 'clip' in futures:
+                clip = futures['clip'].result()
+                if clip:
+                    parts.append(f"Clipboard content: {clip}")
 
         system_prompt = "\n".join(parts)
 
@@ -1610,46 +1686,44 @@ class GnomeSpeaksService:
                     _schedule_warmup()
                     return
 
-                half_duplex = CONFIG.get("half_duplex", False)
                 self._set_state("speaking")
                 state._cancel_event.clear()
                 # Show reply text as live subtitle on badge
                 GLib.idle_add(self._emit_partial_transcription, speak_text)
 
-                if half_duplex:
-                    # Half-duplex: speak, then re-listen via streaming STT
-                    log.info("Conversation reply (half-duplex): %s", speak_text[:100])
-                    speech_tts.tts(speak_text, quality=self._voice_quality,
-                                    audio_level_cb=self._tts_level_cb)
-                    if state._cancel_event.is_set():
-                        self._set_state("idle")
-                        return
-                    # Re-listen via start_listening → _streaming_stt_worker,
-                    # which routes back to _conversation_worker when
-                    # conversation_mode is on, giving full streaming partials.
-                    self._set_state("idle")
+                # On headphones, prewarm recorder during TTS for fast turnaround.
+                # On speakers (half-duplex), DON'T prewarm during TTS — we want
+                # the mic closed while audio plays to prevent echo pickup.
+                if not CONFIG.get("half_duplex", False):
                     _schedule_warmup()
-                    GLib.idle_add(lambda: self.start_listening() or False)
-                    return
-                else:
-                    # Full-duplex: speak + listen simultaneously
-                    log.info("Conversation reply (full-duplex): %s", speak_text[:100])
-                    result = speech_tts.talk_fullduplex(
-                        speak_text, quality=self._voice_quality,
-                        audio_level_cb=self._tts_level_cb,
-                        partial_cb=lambda t: GLib.idle_add(self._emit_partial_transcription, t),
-                    )
-                    user_reply = result.get("text", "")
 
-                if user_reply:
-                    user_reply = apply_voice_commands(user_reply)
-                    user_reply = apply_auto_corrections(user_reply)
-                    GLib.idle_add(self._emit_transcription_ready, user_reply)
-                    log.info("Conversation turn: %s", user_reply[:100])
-                    # Continue the conversation loop
-                    self._conversation_worker(user_reply)
-                    return
+                # Speak the reply, then go idle
+                log.info("Conversation reply: %s", speak_text[:100])
+                speech_tts.tts(speak_text, quality=self._voice_quality,
+                                audio_level_cb=self._tts_level_cb)
+
+                # Half-duplex drain: on speakers, wait for audio buffers to
+                # fully flush before opening mic. PipeWire/Pulse can buffer
+                # ~200-500ms of audio after the player process exits.
+                if CONFIG.get("half_duplex", False):
+                    time.sleep(1.0)
+                    _schedule_warmup()
+
                 self._set_state("idle")
+
+                # In loop mode, restart listening immediately — don't wait
+                # for the roundabout path through the streaming worker exit.
+                # The lambda re-checks _stop_event so a Stop call between
+                # queuing and execution actually stops the loop.
+                if (CONFIG.get("continuous_dictation", False)
+                        and CONFIG.get("conversation_mode", False)
+                        and not self._stop_event.is_set()):
+                    log.info("AI+Loop: quick-restart listening")
+                    GLib.idle_add(lambda: self.start_listening()
+                                  if (CONFIG.get("continuous_dictation", False)
+                                      and CONFIG.get("conversation_mode", False)
+                                      and not self._stop_event.is_set())
+                                  else False)
             else:
                 self._set_state("idle")
         except Exception as exc:

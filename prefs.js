@@ -97,93 +97,120 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             icon_name: 'view-list-symbolic',
         });
 
-        // ── Overview ──
-        const overviewGroup = new Adw.PreferencesGroup({
-            title: 'How It Works',
-            description: 'GNOME Speaks adds voice input and output to your desktop. Click the floating badge to start listening, and use the panel menu or badge pills to switch modes.',
-        });
-        page.add(overviewGroup);
-
-        this._addInfoRow(overviewGroup, 'Badge Click',
-            'Idle: start listening - Listening: stop and transcribe - Speaking: stop playback');
-        this._addInfoRow(overviewGroup, 'Right-Click Badge',
-            'Opens quick actions: speak clipboard, read selection, stop, hide badge');
-        this._addInfoRow(overviewGroup, 'Quality Pill',
-            'Click the sparkle/bolt pill to toggle HD voice (natural, ~1.2s latency) and Fast voice (~120ms latency)');
-        this._addInfoRow(overviewGroup, 'Mode Pill',
-            'Click the pencil/robot pill to toggle between Type (dictation) and AI (conversation) modes');
-
         // ── Type Mode ──
         const typeGroup = new Adw.PreferencesGroup({
-            title: 'Type Mode - Dictation',
-            description: 'Speech is transcribed and typed at the cursor via wtype (Wayland) or xdotool (X11). Default mode, shown as a pencil pill on the badge.',
+            title: 'Type Mode',
+            description: 'Speech is transcribed and typed at the cursor via wtype (Wayland) or xdotool (X11). Click the floating badge or press Super+Alt+Space to start. Click again, say "over", or wait for silence to stop.',
         });
         page.add(typeGroup);
 
-        this._addInfoRow(typeGroup, 'Start',
-            'Click the floating badge, or press Super+Alt+Space');
-        this._addInfoRow(typeGroup, 'Stop',
-            'Click again, say the end word (default: "over"), or wait for silence');
-        this._addInfoRow(typeGroup, 'Best For',
-            'Emails, documents, code comments, chat messages, form fields');
-        this._addInfoRow(typeGroup, 'Configure',
-            'See the Listening page for silence timeout, voice commands, end word, sensitivity');
+        this._addSwitchRow(typeGroup, 'Type at Cursor',
+            'Type transcribed text where the cursor is. When off, text is copied to clipboard only.',
+            'dictation_mode', true);
+
+        this._addSwitchRow(typeGroup, 'Voice Commands',
+            'Convert spoken punctuation ("period", "comma", "new line") to characters',
+            'voice_commands', true);
+
+        this._addEntryRow(typeGroup, 'End Word', 'end_word', 'over',
+            'Say this word to immediately stop recording');
 
         // ── AI Mode ──
         const aiGroup = new Adw.PreferencesGroup({
-            title: 'AI Mode - Conversation',
-            description: 'Speech is sent to an LLM (Claude, GPT, etc.) and the response is spoken aloud. Shown as a robot pill on the badge.',
+            title: 'AI Mode',
+            description: 'Speech is sent to an LLM (Claude, GPT, etc.) and the response is spoken aloud. Toggle with the robot pill on the badge, or the panel menu.',
         });
         page.add(aiGroup);
 
-        this._addInfoRow(aiGroup, 'Start',
-            'Click the robot pill on the badge, then click the badge to listen');
-        this._addInfoRow(aiGroup, 'Stop',
-            'Click badge during speaking to stop, or click robot pill to return to Type mode');
-        this._addInfoRow(aiGroup, 'Best For',
-            'Quick questions, brainstorming, hands-free research, language practice');
-        this._addInfoRow(aiGroup, 'Configure',
-            'See the Advanced page for LLM provider, model, API key, and system prompt');
+        this._addSwitchRow(aiGroup, 'AI Conversation',
+            'Send transcriptions to an LLM and speak the response aloud',
+            'conversation_mode', false);
+
+        this._addComboRow(aiGroup, 'LLM Provider', 'llm_provider', [
+            ['anthropic', 'Anthropic (Claude)'],
+            ['openai', 'OpenAI (GPT)'],
+            ['azure', 'Azure AI Foundry'],
+            ['bedrock', 'AWS Bedrock'],
+            ['google', 'Google Vertex AI'],
+            ['cloud-chat-assistant', 'Cloud Chat Assistant'],
+        ], 'anthropic');
+
+        this._addComboRow(aiGroup, 'LLM Model', 'llm_model', [
+            ['claude-opus-4-6', 'Claude Opus 4.6'],
+            ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
+            ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5'],
+            ['gpt-4o', 'GPT-4o'],
+            ['gpt-4o-mini', 'GPT-4o Mini'],
+            ['o4-mini', 'o4-mini'],
+            ['gpt-5.3-chat', 'GPT-5.3 Chat'],
+            ['grok-3', 'Grok-3'],
+            ['DeepSeek-R1', 'DeepSeek R1'],
+            ['Llama-3.3-70B-Instruct', 'Llama 3.3 70B'],
+            ['gemini-2.5-flash', 'Gemini 2.5 Flash'],
+            ['gemini-2.5-pro', 'Gemini 2.5 Pro'],
+        ], 'claude-opus-4-6');
+
+        this._addPasswordRow(aiGroup, 'LLM API Key', 'llm_api_key',
+            'API key for the selected LLM provider');
 
         // ── Continuous Dictation ──
         const contGroup = new Adw.PreferencesGroup({
             title: 'Continuous Dictation',
-            description: 'Type mode with auto-restart. After each pause, listening resumes automatically so you can dictate without re-clicking.',
+            description: 'After each pause, listening automatically restarts so you can dictate without re-clicking the badge. Works in both Type and AI modes.',
         });
         page.add(contGroup);
 
-        this._addInfoRow(contGroup, 'Start',
-            'Enable "Continuous Dictation" in the panel menu, then click badge');
-        this._addInfoRow(contGroup, 'Stop',
-            'Disable the toggle in the panel menu, or press Super+Alt+Space');
-        this._addInfoRow(contGroup, 'Best For',
-            'Long-form writing, meeting notes, journal entries');
+        this._addSwitchRow(contGroup, 'Continuous Dictation',
+            'Automatically restart listening after each utterance',
+            'continuous_dictation', false);
 
-        // ── Hands-Free ──
-        const handsGroup = new Adw.PreferencesGroup({
-            title: 'Hands-Free Mode',
-            description: 'AI Conversation + Continuous listening = full voice assistant. Speak, get a response, speak again without clicking.',
+        this._addSpinRow(contGroup, 'Silence Timeout', 'silence_timeout',
+            0.5, 10.0, 0.5, 1, 3.0,
+            'Seconds of silence after speech before auto-stop');
+
+        this._addSpinRow(contGroup, 'No Speech Timeout', 'no_speech_timeout',
+            1.0, 30.0, 1.0, 0, 7.0,
+            'Max seconds to wait for any speech before giving up');
+
+        // ── Barge-in ──
+        const bargeGroup = new Adw.PreferencesGroup({
+            title: 'Barge-in',
+            description: 'Interrupt TTS playback by speaking. The AI pauses, listens to you, then resumes or responds.',
         });
-        page.add(handsGroup);
+        page.add(bargeGroup);
 
-        this._addInfoRow(handsGroup, 'Start',
-            'Enable "AI Conversation" and "Hands-Free" in the panel menu');
-        this._addInfoRow(handsGroup, 'Stop',
-            'Disable either toggle, or say the end word');
-        this._addInfoRow(handsGroup, 'Best For',
-            'Cooking, exercising, accessibility - fully voice-controlled AI');
+        this._addSwitchRow(bargeGroup, 'Enable Barge-in',
+            'Pause TTS when you start speaking',
+            'enable_barge_in', false);
 
-        // ── Talk Mode ──
-        const talkGroup = new Adw.PreferencesGroup({
-            title: 'Talk Mode - D-Bus Integration',
-            description: 'Full-duplex voice method for external apps. Programs send text via D-Bus and receive a spoken AI reply.',
+        // ── Notification Reader ──
+        const notifGroup = new Adw.PreferencesGroup({
+            title: 'Notification Reader',
+            description: 'Automatically read GNOME desktop notifications aloud as they arrive.',
         });
-        page.add(talkGroup);
+        page.add(notifGroup);
 
-        this._addInfoRow(talkGroup, 'How It Works',
-            'App calls org.gnome.Speaks.Talk(text) -> STT + LLM + TTS -> reply returned');
-        this._addInfoRow(talkGroup, 'Best For',
-            'CLI voice assistants (Claude Code, Copilot CLI), automation, MCP servers');
+        this._addSwitchRow(notifGroup, 'Read Notifications',
+            'Speak notification titles and body text',
+            'read_notifications', false);
+
+        // ── Mode Combinations ──
+        const comboGroup = new Adw.PreferencesGroup({
+            title: 'Mode Combinations',
+            description: 'Modes combine to create different workflows. Here is what happens with each combination of toggles.',
+        });
+        page.add(comboGroup);
+
+        this._addInfoRow(comboGroup, 'Type only',
+            'Click badge, speak, text typed at cursor, done. The simplest mode.');
+        this._addInfoRow(comboGroup, 'Type + Continuous',
+            'Click badge, speak, text typed, auto-listens again. Great for long dictation.');
+        this._addInfoRow(comboGroup, 'AI only',
+            'Click badge, speak, AI thinks and responds aloud, done.');
+        this._addInfoRow(comboGroup, 'AI + Continuous (Hands-Free)',
+            'Click badge, speak, AI responds, auto-listens, loop. Full voice assistant. Enable via panel menu Hands-Free toggle.');
+        this._addInfoRow(comboGroup, 'Talk Mode (D-Bus)',
+            'External apps call org.gnome.Speaks.Talk(text) for STT + LLM + TTS. Used by Claude Code, Copilot CLI, and MCP servers.');
 
         // ── Shortcuts ──
         const shortcutsGroup = new Adw.PreferencesGroup({
@@ -192,14 +219,10 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(shortcutsGroup);
 
-        this._addInfoRow(shortcutsGroup, 'Super+Alt+Space',
-            'Toggle listening on/off');
-        this._addInfoRow(shortcutsGroup, 'Super+Alt+C',
-            'Speak clipboard contents aloud');
-        this._addInfoRow(shortcutsGroup, 'Super+Alt+R',
-            'Read selected text aloud');
-        this._addInfoRow(shortcutsGroup, 'Super+Alt+V',
-            'Toggle HD / Fast voice quality');
+        this._addShortcutRow(shortcutsGroup, 'Toggle Listening', 'toggle-listening-shortcut');
+        this._addShortcutRow(shortcutsGroup, 'Speak Clipboard', 'speak-clipboard-shortcut');
+        this._addShortcutRow(shortcutsGroup, 'Read Selection', 'read-selection-shortcut');
+        this._addShortcutRow(shortcutsGroup, 'Toggle Voice Quality', 'toggle-voice-quality-shortcut');
 
         window.add(page);
     }

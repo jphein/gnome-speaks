@@ -150,6 +150,15 @@ INTROSPECTION_XML = """
     <method name="ToggleHandsFree">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="GetContinuousDictation">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetConversationMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetHandsFree">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
     <method name="Talk">
       <arg direction="in" type="s" name="text"/>
       <arg direction="out" type="s" name="reply"/>
@@ -878,6 +887,7 @@ class GnomeSpeaksService:
         # 5. Receive WS messages (on this thread)
         deadline = time.time() + MAX_LISTEN_SECONDS + 5
         got_phrase = False
+        natural_end = False  # True when Azure sends turn_end (vs user clicking stop)
 
         while time.time() < deadline and not self._stop_event.is_set():
             try:
@@ -924,7 +934,11 @@ class GnomeSpeaksService:
             elif mtype == "turn_end":
                 _log(f"turn.end received (phrases={len(phrases)})")
                 got_phrase = True  # WS analyzed audio, even if no speech found
-                # Signal sender to stop recording immediately
+                # Signal sender to stop recording immediately.
+                # Use _stop_event for sender flow control, but track that
+                # this was a natural end (not user-initiated) so continuous
+                # dictation can still auto-restart.
+                natural_end = True
                 self._stop_event.set()
                 break
 
@@ -1018,7 +1032,11 @@ class GnomeSpeaksService:
         _schedule_warmup()
 
         # 10. Continuous dictation: auto-restart listening
-        if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
+        # Restart if: text was captured, continuous mode is on, and either the
+        # turn ended naturally (turn_end from Azure) or _stop_event was never
+        # set (silence/VAD ended recording). Skip restart only when the user
+        # explicitly stopped (stop_listening/stop set _stop_event without turn_end).
+        if user_text and CONFIG.get("continuous_dictation", False) and (natural_end or not self._stop_event.is_set()):
             GLib.idle_add(lambda: self.start_listening() or False)
 
     def stop_listening(self):
@@ -1215,6 +1233,17 @@ class GnomeSpeaksService:
 
     def get_barge_in(self):
         return CONFIG.get("enable_barge_in", False)
+
+    def get_continuous_dictation(self):
+        return CONFIG.get("continuous_dictation", False)
+
+    def get_conversation_mode(self):
+        return CONFIG.get("conversation_mode", False)
+
+    def get_hands_free(self):
+        conv = CONFIG.get("conversation_mode", False)
+        cont = CONFIG.get("continuous_dictation", False)
+        return conv and cont
 
     def toggle_hands_free(self):
         """Toggle hands-free mode: enables both continuous_dictation + conversation_mode together."""

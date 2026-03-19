@@ -191,15 +191,7 @@
     text-align: center;
 }
 
-/* Compact pill in idle — icon-only, smaller */
-.gnome-speaks-idle .gnome-speaks-quality-hd,
-.gnome-speaks-idle .gnome-speaks-quality-fast,
-.gnome-speaks-idle .gnome-speaks-mode-dict,
-.gnome-speaks-idle .gnome-speaks-mode-chat {
-    font-size: 12px;
-    padding: 2px 5px;
-    margin-left: 3px;
-}
+/* Pills are hidden in idle state — no compact styles needed */
 
 /* ── Quality: HD (warm gold — premium feel) ── */
 .gnome-speaks-quality-hd {
@@ -243,6 +235,40 @@
 }
 .gnome-speaks-mode-chat:hover {
     background-color: rgba(160, 100, 255, 0.42);
+}
+
+/* ── Pill: Off (dim, inactive toggle) ── */
+.gnome-speaks-pill-off {
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 12px;
+    padding: 3px 10px;
+    margin-left: 6px;
+    background-color: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    text-align: center;
+}
+.gnome-speaks-pill-off:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.6);
+}
+
+/* ── Pill: On (bright cyan — clearly enabled) ── */
+.gnome-speaks-pill-on {
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 12px;
+    padding: 3px 10px;
+    margin-left: 6px;
+    background-color: rgba(40, 180, 220, 0.30);
+    color: rgba(100, 220, 255, 1.0);
+    border: 1px solid rgba(40, 180, 220, 0.40);
+    box-shadow: 0 0 8px rgba(40, 180, 220, 0.20);
+    text-align: center;
+}
+.gnome-speaks-pill-on:hover {
+    background-color: rgba(40, 180, 220, 0.42);
 }
 
 /* ============================================================

@@ -73,6 +73,15 @@ const DBUS_XML = `
     <method name="ToggleHandsFree">
       <arg direction="out" type="b" name="enabled"/>
     </method>
+    <method name="GetContinuousDictation">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetConversationMode">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
+    <method name="GetHandsFree">
+      <arg direction="out" type="b" name="enabled"/>
+    </method>
     <method name="GetAudioInfo">
       <arg direction="out" type="s" name="info"/>
     </method>
@@ -340,42 +349,27 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badge.add_child(this._icon);
         this._badge.add_child(this._label);
 
-        // Voice quality pill — always visible, compact in idle
-        this._qualityPill = new St.Label({
-            text: '✦',
-            style_class: 'gnome-speaks-quality-hd',
-            reactive: true,
-            track_hover: true,
-            y_align: Clutter.ActorAlign.CENTER,
-            x_align: Clutter.ActorAlign.CENTER,
-        });
-        this._qualityPill.connect('button-release-event', (actor, event) => {
-            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
-            this._toggleVoiceQuality();
-            return Clutter.EVENT_STOP;
-        });
-        // Prevent pill clicks from triggering badge drag/click
-        this._qualityPill.connect('button-press-event', () => Clutter.EVENT_STOP);
-        this._badge.add_child(this._qualityPill);
-
-        // Mode pill — always visible, compact in idle
+        // Pills — hidden in idle, shown when active
         this._conversationMode = false;
-        this._modePill = new St.Label({
-            text: '✏️',
-            style_class: 'gnome-speaks-mode-dict',
-            reactive: true,
-            track_hover: true,
-            y_align: Clutter.ActorAlign.CENTER,
-            x_align: Clutter.ActorAlign.CENTER,
-        });
-        this._modePill.connect('button-release-event', (actor, event) => {
-            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
-            this._toggleMode();
-            return Clutter.EVENT_STOP;
-        });
-        // Prevent pill clicks from triggering badge drag/click
-        this._modePill.connect('button-press-event', () => Clutter.EVENT_STOP);
+        this._continuousMode = false;
+        this._handsFreeMode = false;
+        this._bargeInMode = false;
+
+        this._qualityPill = this._createPill('✦', 'gnome-speaks-quality-hd', () => this._toggleVoiceQuality());
+        this._modePill = this._createPill('✏️', 'gnome-speaks-mode-dict', () => this._toggleMode());
+        this._continuousPill = this._createPill('🔄', 'gnome-speaks-pill-off', () => this._toggleContinuous());
+        this._handsFreePill = this._createPill('🙌', 'gnome-speaks-pill-off', () => this._toggleHandsFree());
+        this._bargeInPill = this._createPill('⏸', 'gnome-speaks-pill-off', () => this._toggleBargeIn());
+
+        this._badge.add_child(this._qualityPill);
         this._badge.add_child(this._modePill);
+        this._badge.add_child(this._continuousPill);
+        this._badge.add_child(this._handsFreePill);
+        this._badge.add_child(this._bargeInPill);
+
+        this._pills = [this._qualityPill, this._modePill, this._continuousPill, this._handsFreePill, this._bargeInPill];
+        for (let pill of this._pills)
+            pill.hide();
 
         this._badge.set_pivot_point(0.5, 0.5);
 
@@ -470,10 +464,7 @@ export default class GnomeSpeaksExtension extends Extension {
     _updateQualityPill() {
         if (!this._qualityPill) return;
         let isHD = this._voiceQuality === 'hd';
-        let compact = this._state === States.IDLE;
-        this._qualityPill.text = isHD
-            ? (compact ? '✦' : '✦ HD')
-            : (compact ? '⚡' : '⚡ Fast');
+        this._qualityPill.text = isHD ? '✦ HD' : '⚡ Fast';
         this._qualityPill.remove_style_class_name(
             isHD ? 'gnome-speaks-quality-fast' : 'gnome-speaks-quality-hd');
         this._qualityPill.add_style_class_name(
@@ -498,6 +489,101 @@ export default class GnomeSpeaksExtension extends Extension {
         });
     }
 
+    _createPill(text, styleClass, onClick) {
+        let pill = new St.Label({
+            text: text,
+            style_class: styleClass,
+            reactive: true,
+            track_hover: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_align: Clutter.ActorAlign.CENTER,
+        });
+        pill.connect('button-release-event', (actor, event) => {
+            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+            onClick();
+            return Clutter.EVENT_STOP;
+        });
+        pill.connect('button-press-event', () => Clutter.EVENT_STOP);
+        return pill;
+    }
+
+    _toggleContinuous() {
+        if (!this._proxy) {
+            this._continuousMode = !this._continuousMode;
+            this._updateContinuousPill();
+            return;
+        }
+        this._proxy.ToggleContinuousDictationRemote((result, error) => {
+            if (error) return;
+            this._continuousMode = result[0];
+            this._updateContinuousPill();
+            if (this._menuContinuousToggle)
+                this._menuContinuousToggle.setToggleState(this._continuousMode);
+        });
+    }
+
+    _updateContinuousPill() {
+        if (!this._continuousPill) return;
+        let on = this._continuousMode;
+        this._continuousPill.text = on ? '🔄 Loop' : '🔄';
+        this._continuousPill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
+        this._continuousPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
+    }
+
+    _toggleHandsFree() {
+        if (!this._proxy) {
+            this._handsFreeMode = !this._handsFreeMode;
+            this._updateHandsFreePill();
+            return;
+        }
+        this._proxy.ToggleHandsFreeRemote((result, error) => {
+            if (error) return;
+            this._handsFreeMode = result[0];
+            this._updateHandsFreePill();
+            if (this._menuHandsFreeToggle)
+                this._menuHandsFreeToggle.setToggleState(this._handsFreeMode);
+        });
+    }
+
+    _updateHandsFreePill() {
+        if (!this._handsFreePill) return;
+        let on = this._handsFreeMode;
+        this._handsFreePill.text = on ? '🙌 Free' : '🙌';
+        this._handsFreePill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
+        this._handsFreePill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
+    }
+
+    _toggleBargeIn() {
+        if (!this._proxy) {
+            this._bargeInMode = !this._bargeInMode;
+            this._updateBargeInPill();
+            return;
+        }
+        this._proxy.ToggleBargeInRemote((result, error) => {
+            if (error) return;
+            this._bargeInMode = result[0];
+            this._updateBargeInPill();
+        });
+    }
+
+    _updateBargeInPill() {
+        if (!this._bargeInPill) return;
+        let on = this._bargeInMode;
+        this._bargeInPill.text = on ? '⏸ Barge' : '⏸';
+        this._bargeInPill.remove_style_class_name(on ? 'gnome-speaks-pill-off' : 'gnome-speaks-pill-on');
+        this._bargeInPill.add_style_class_name(on ? 'gnome-speaks-pill-on' : 'gnome-speaks-pill-off');
+    }
+
+    _showPills(visible) {
+        if (!this._pills) return;
+        for (let pill of this._pills) {
+            if (visible)
+                pill.show();
+            else
+                pill.hide();
+        }
+    }
+
     _updateAudioInfoMenu(info) {
         if (!this._menuAudioInfoItem)
             return;
@@ -516,10 +602,7 @@ export default class GnomeSpeaksExtension extends Extension {
     _updateModePill() {
         if (!this._modePill) return;
         let isChat = this._conversationMode;
-        let compact = this._state === States.IDLE;
-        this._modePill.text = isChat
-            ? (compact ? '🤖' : '🤖 AI')
-            : (compact ? '✏️' : '✏️ Type');
+        this._modePill.text = isChat ? '🤖 AI' : '✏️ Type';
         this._modePill.remove_style_class_name(
             isChat ? 'gnome-speaks-mode-dict' : 'gnome-speaks-mode-chat');
         this._modePill.add_style_class_name(
@@ -555,6 +638,10 @@ export default class GnomeSpeaksExtension extends Extension {
         this._label = null;
         this._qualityPill = null;
         this._modePill = null;
+        this._continuousPill = null;
+        this._handsFreePill = null;
+        this._bargeInPill = null;
+        this._pills = null;
     }
 
     _createPanelIndicator() {
@@ -879,11 +966,37 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         });
 
-        // No GetConversationMode D-Bus method — initialize to dict mode
-        this._conversationMode = false;
-        this._updateModePill();
-        if (this._menuConversationToggle)
-            this._menuConversationToggle.setToggleState(false);
+        // Sync mode states from service
+        this._proxy.GetConversationModeRemote((result, error) => {
+            if (!error && result) {
+                this._conversationMode = result[0];
+                this._updateModePill();
+                if (this._menuConversationToggle)
+                    this._menuConversationToggle.setToggleState(this._conversationMode);
+            }
+        });
+        this._proxy.GetContinuousDictationRemote((result, error) => {
+            if (!error && result) {
+                this._continuousMode = result[0];
+                this._updateContinuousPill();
+                if (this._menuContinuousToggle)
+                    this._menuContinuousToggle.setToggleState(this._continuousMode);
+            }
+        });
+        this._proxy.GetHandsFreeRemote((result, error) => {
+            if (!error && result) {
+                this._handsFreeMode = result[0];
+                this._updateHandsFreePill();
+                if (this._menuHandsFreeToggle)
+                    this._menuHandsFreeToggle.setToggleState(this._handsFreeMode);
+            }
+        });
+        this._proxy.GetBargeInRemote((result, error) => {
+            if (!error && result) {
+                this._bargeInMode = result[0];
+                this._updateBargeInPill();
+            }
+        });
     }
 
     _setState(newState) {
@@ -922,9 +1035,13 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         }
 
-        // Pills: compact (icon-only) in idle, full labels when expanded
+        // Pills: hidden in idle, shown when active
+        this._showPills(newState !== States.IDLE);
         this._updateQualityPill();
         this._updateModePill();
+        this._updateContinuousPill();
+        this._updateHandsFreePill();
+        this._updateBargeInPill();
 
         // Update panel icon and menu
         this._updatePanelIcon(newState);

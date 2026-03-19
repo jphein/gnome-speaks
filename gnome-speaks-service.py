@@ -1895,6 +1895,26 @@ class DBusHandler:
                 result = self.service.toggle_hands_free()
                 invocation.return_value(GLib.Variant("(b)", (result,)))
 
+            elif method_name == "GetContinuousDictation":
+                result = self.service.get_continuous_dictation()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetConversationMode":
+                result = self.service.get_conversation_mode()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetHandsFree":
+                result = self.service.get_hands_free()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "ToggleTerminalMode":
+                result = self.service.toggle_terminal_mode()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
+            elif method_name == "GetTerminalMode":
+                result = self.service.get_terminal_mode()
+                invocation.return_value(GLib.Variant("(b)", (result,)))
+
             elif method_name == "GetAudioInfo":
                 result = self.service.get_audio_info()
                 invocation.return_value(GLib.Variant("(s)", (result,)))

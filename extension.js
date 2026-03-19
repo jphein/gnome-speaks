@@ -163,6 +163,14 @@ const STATE_CONFIG = {
 
 export default class GnomeSpeaksExtension extends Extension {
     enable() {
+        try {
+            this._enable();
+        } catch (e) {
+            log(`[GNOME Speaks] enable() failed: ${e.message}\n${e.stack}`);
+        }
+    }
+
+    _enable() {
         this._state = States.IDLE;
         this._proxy = null;
         this._proxySignals = [];
@@ -212,6 +220,14 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     disable() {
+        try {
+            this._disable();
+        } catch (e) {
+            log(`[GNOME Speaks] disable() failed: ${e.message}\n${e.stack}`);
+        }
+    }
+
+    _disable() {
         if (this._busWatchId) {
             Gio.bus_unwatch_name(this._busWatchId);
             this._busWatchId = 0;

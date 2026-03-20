@@ -314,8 +314,7 @@
     min-width: 300px;
     max-width: 800px;
     border: 1px solid rgba(160, 120, 255, 0.12);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5),
-                0 0 12px rgba(140, 80, 230, 0.08);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
 .gnome-speaks-subtitle-text {

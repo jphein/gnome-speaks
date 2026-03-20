@@ -20,6 +20,7 @@ HTTP session pooling, VAD, energy-gated silence detection.
 """
 
 import argparse
+import http.server
 import json
 import logging
 import os
@@ -537,6 +538,14 @@ class GnomeSpeaksService:
         # Conversation history (cleared when conversation mode toggled off)
         self._conversation_history = []
         self._conversation_lock = threading.Lock()
+
+        # HTTP progress tracking for REST API status endpoint
+        self._http_progress = {
+            "text": "", "elapsed": 0.0, "estimated_duration": 0.0,
+            "percent": 0, "started_at": 0.0,
+            "pause_accumulated": 0.0, "pause_started": 0.0,
+        }
+        self._http_progress_lock = threading.Lock()
 
     # -- Config sync -------------------------------------------------------
 
@@ -1208,6 +1217,13 @@ class GnomeSpeaksService:
         """Background thread: TTS using speech_tts.tts()."""
         try:
             state._cancel_event.clear()
+            # Update HTTP progress tracking
+            with self._http_progress_lock:
+                self._http_progress["text"] = text[:80]
+                self._http_progress["started_at"] = time.time()
+                self._http_progress["estimated_duration"] = max(1.0, len(text) / 22.0)
+                self._http_progress["pause_accumulated"] = 0.0
+                self._http_progress["pause_started"] = 0.0
             # Show text being spoken as live subtitle on badge
             GLib.idle_add(self._emit_partial_transcription, text)
             result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
@@ -1218,6 +1234,13 @@ class GnomeSpeaksService:
             log.exception("Speak failed: %s", exc)
             GLib.idle_add(self._emit_error, f"Speak failed: {exc}")
         finally:
+            # Clear HTTP progress to idle state
+            with self._http_progress_lock:
+                self._http_progress = {
+                    "text": "", "elapsed": 0.0, "estimated_duration": 0.0,
+                    "percent": 0, "started_at": 0.0,
+                    "pause_accumulated": 0.0, "pause_started": 0.0,
+                }
             # Only transition to idle if we're still in speaking state.
             # Read state under lock, then call _set_state outside (it acquires its own lock).
             with self._state_lock:
@@ -2170,6 +2193,178 @@ class GnomeSpeaksService:
 
 
 # ---------------------------------------------------------------------------
+# HTTP REST API for browser-based TTS control
+# ---------------------------------------------------------------------------
+
+class SpeechHTTPHandler(http.server.BaseHTTPRequestHandler):
+    """Lightweight REST handler exposing TTS control to localhost callers."""
+
+    service = None  # set to GnomeSpeaksService instance before server starts
+
+    # Voices cache: (data, timestamp)
+    _voices_cache = (None, 0.0)
+    _VOICES_CACHE_TTL = 300  # 5 minutes
+
+    def log_message(self, format, *args):
+        """Route HTTP log messages through the existing logger instead of stderr."""
+        log.debug("HTTP %s", format % args)
+
+    # -- CORS helpers ------------------------------------------------------
+
+    def _set_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self._set_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error_json(self, status, message):
+        self._send_json({"ok": False, "error": message}, status=status)
+
+    # -- Routing -----------------------------------------------------------
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._set_cors_headers()
+        self.end_headers()
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/status":
+            self._handle_status()
+        elif path == "/voices":
+            self._handle_voices()
+        else:
+            self._send_error_json(404, f"Unknown endpoint: {path}")
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        if path == "/speak":
+            self._handle_speak()
+        elif path == "/stop":
+            self._handle_stop()
+        elif path == "/pause":
+            self._handle_pause()
+        elif path == "/resume":
+            self._handle_resume()
+        else:
+            self._send_error_json(404, f"Unknown endpoint: {path}")
+
+    # -- Request body parsing ----------------------------------------------
+
+    def _read_json_body(self):
+        """Read and parse JSON request body. Returns dict or None on error."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            return {}
+        try:
+            raw = self.rfile.read(content_length)
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._send_error_json(400, f"Invalid JSON: {exc}")
+            return None
+
+    # -- Endpoint handlers -------------------------------------------------
+
+    def _handle_speak(self):
+        body = self._read_json_body()
+        if body is None:
+            return  # error already sent
+        text = body.get("text", "")
+        if not text or not text.strip():
+            self._send_error_json(400, "Missing or empty 'text' field")
+            return
+
+        svc = self.service
+
+        # Temporarily override voice/quality/speed if provided
+        original_quality = None
+        if body.get("quality") and body["quality"] in ("fast", "hd"):
+            original_quality = svc._voice_quality
+            svc._voice_quality = body["quality"]
+
+        try:
+            svc.speak(text)
+            self._send_json({"ok": True, "state": "speaking"})
+        finally:
+            if original_quality is not None:
+                svc._voice_quality = original_quality
+
+    def _handle_stop(self):
+        self.service.stop()
+        self._send_json({"ok": True, "state": "idle"})
+
+    def _handle_pause(self):
+        svc = self.service
+        state.pause_active()
+        # Track pause start time for elapsed calculation
+        with svc._http_progress_lock:
+            if svc._http_progress["started_at"] > 0:
+                svc._http_progress["pause_started"] = time.time()
+        self._send_json({"ok": True, "paused": True})
+
+    def _handle_resume(self):
+        svc = self.service
+        state.resume_active()
+        # Accumulate pause duration
+        with svc._http_progress_lock:
+            ps = svc._http_progress["pause_started"]
+            if ps > 0:
+                svc._http_progress["pause_accumulated"] += time.time() - ps
+                svc._http_progress["pause_started"] = 0.0
+        self._send_json({"ok": True, "paused": False})
+
+    def _handle_status(self):
+        svc = self.service
+        current = svc.current_state
+        paused = state._pause_event.is_set() if hasattr(state, '_pause_event') else False
+
+        progress = None
+        with svc._http_progress_lock:
+            p = svc._http_progress
+            if p["started_at"] > 0 and current == "speaking":
+                pause_acc = p["pause_accumulated"]
+                # If currently paused, include ongoing pause time
+                if p["pause_started"] > 0:
+                    pause_acc += time.time() - p["pause_started"]
+                elapsed = time.time() - p["started_at"] - pause_acc
+                elapsed = max(0.0, elapsed)
+                est = p["estimated_duration"]
+                pct = min(100, int((elapsed / est) * 100)) if est > 0 else 0
+                progress = {
+                    "elapsed": round(elapsed, 1),
+                    "estimated_duration": round(est, 1),
+                    "percent": pct,
+                    "text": p["text"],
+                }
+
+        result = {"state": current, "paused": paused}
+        if progress is not None:
+            result["progress"] = progress
+        self._send_json(result)
+
+    def _handle_voices(self):
+        now = time.time()
+        data, ts = SpeechHTTPHandler._voices_cache
+        if data is not None and (now - ts) < self._VOICES_CACHE_TTL:
+            self._send_json(data)
+            return
+        try:
+            voices = speech_tts.get_voices()
+            SpeechHTTPHandler._voices_cache = (voices, now)
+            self._send_json(voices)
+        except Exception as exc:
+            log.warning("Failed to fetch voices: %s", exc)
+            self._send_error_json(500, f"Failed to fetch voices: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # DBus method dispatch
 # ---------------------------------------------------------------------------
 
@@ -2386,6 +2581,11 @@ def main():
         "--replace", action="store_true",
         help="Replace an existing instance of the service",
     )
+    parser.add_argument(
+        "--http-port", type=int,
+        default=int(os.environ.get("GNOME_SPEAKS_HTTP_PORT", "7710")),
+        help="HTTP REST API port (default: 7710, env: GNOME_SPEAKS_HTTP_PORT)",
+    )
     args = parser.parse_args()
 
     # Validate config
@@ -2459,9 +2659,18 @@ def main():
     # Start inactivity timer
     service._reset_inactivity_timer()
 
+    # Start HTTP REST API server
+    SpeechHTTPHandler.service = service
+    http_server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", args.http_port), SpeechHTTPHandler,
+    )
+    threading.Thread(target=http_server.serve_forever, daemon=True).start()
+    log.info("HTTP server listening on http://127.0.0.1:%d", args.http_port)
+
     # Handle SIGTERM/SIGINT
     def _on_signal(signum):
         log.info("Received signal %d, shutting down", signum)
+        http_server.shutdown()
         service.shutdown()
         loop.quit()
         return GLib.SOURCE_REMOVE
@@ -2474,6 +2683,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        http_server.shutdown()
         service.shutdown()
         Gio.bus_unown_name(owner_id)
         log.info("Exited cleanly")

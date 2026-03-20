@@ -199,6 +199,11 @@ INTROSPECTION_XML = """
     <signal name="PartialTranscription">
       <arg type="s" name="text"/>
     </signal>
+    <signal name="SubtitleUpdate">
+      <arg type="s" name="text"/>
+      <arg type="d" name="duration"/>
+      <arg type="i" name="percent"/>
+    </signal>
     <signal name="AudioLevel">
       <arg type="d" name="level"/>
     </signal>
@@ -632,6 +637,15 @@ class GnomeSpeaksService:
                 None, OBJECT_PATH, INTERFACE_NAME,
                 "PartialTranscription",
                 GLib.Variant("(s)", (text,)),
+            )
+        return False
+
+    def _emit_subtitle_update(self, text, duration, percent):
+        if self._connection is not None:
+            self._connection.emit_signal(
+                None, OBJECT_PATH, INTERFACE_NAME,
+                "SubtitleUpdate",
+                GLib.Variant("(sdi)", (text, duration, percent)),
             )
         return False
 
@@ -1213,6 +1227,40 @@ class GnomeSpeaksService:
         """Emit AudioLevel from TTS audio stream for badge VU effect."""
         GLib.idle_add(self._emit_audio_level, level)
 
+    def _run_subtitle_progress(self, text, estimated_duration, stop_event):
+        """Emit SubtitleUpdate signals every 200ms during TTS playback.
+
+        Runs in a daemon thread alongside TTS. Respects pause and cancel.
+        Args:
+            text: Full text being spoken.
+            estimated_duration: Estimated speech duration in seconds.
+            stop_event: threading.Event — set when TTS finishes.
+        """
+        start_time = time.monotonic()
+        pause_accumulated = 0.0
+        pause_start = None
+        while not stop_event.is_set():
+            if state._cancel_event.is_set():
+                break
+            # Handle pause
+            if state._pause_event.is_set():
+                if pause_start is None:
+                    pause_start = time.monotonic()
+                stop_event.wait(timeout=0.2)
+                continue
+            elif pause_start is not None:
+                pause_accumulated += time.monotonic() - pause_start
+                pause_start = None
+
+            elapsed = time.monotonic() - start_time - pause_accumulated
+            pct = min(99, int((elapsed / estimated_duration) * 100)) if estimated_duration > 0 else 0
+            GLib.idle_add(self._emit_subtitle_update, text, estimated_duration, pct)
+            stop_event.wait(timeout=0.2)
+
+        # Final emission at 100%
+        if not state._cancel_event.is_set():
+            GLib.idle_add(self._emit_subtitle_update, text, estimated_duration, 100)
+
     def _speak_worker(self, text):
         """Background thread: TTS using speech_tts.tts()."""
         try:
@@ -1226,8 +1274,24 @@ class GnomeSpeaksService:
                 self._http_progress["pause_started"] = 0.0
             # Show text being spoken as live subtitle on badge
             GLib.idle_add(self._emit_partial_transcription, text)
+
+            # Start subtitle progress thread for progressive reveal
+            speed_factor = 22.0 if self._voice_quality == "fast" else 15.0
+            est_dur = max(1.0, len(text) / speed_factor)
+            sub_stop = threading.Event()
+            sub_thread = threading.Thread(
+                target=self._run_subtitle_progress,
+                args=(text, est_dur, sub_stop),
+                daemon=True,
+            )
+            sub_thread.start()
+
             result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
                                     audio_level_cb=self._tts_level_cb)
+
+            # Stop subtitle progress thread
+            sub_stop.set()
+            sub_thread.join(timeout=1.0)
             if result.get("error"):
                 GLib.idle_add(self._emit_error, result["error"])
         except Exception as exc:
@@ -1321,11 +1385,26 @@ class GnomeSpeaksService:
             # Show text being spoken as live subtitle on badge
             GLib.idle_add(self._emit_partial_transcription, text)
 
+            # Start subtitle progress thread for progressive reveal during TTS
+            speed_factor = 22.0 if self._voice_quality == "fast" else 15.0
+            est_dur = max(1.0, len(text) / speed_factor)
+            sub_stop = threading.Event()
+            sub_thread = threading.Thread(
+                target=self._run_subtitle_progress,
+                args=(text, est_dur, sub_stop),
+                daemon=True,
+            )
+            sub_thread.start()
+
             result = speech_tts.talk_fullduplex(
                 text, quality=self._voice_quality,
                 audio_level_cb=self._tts_level_cb,
                 partial_cb=lambda t: GLib.idle_add(self._emit_partial_transcription, t),
             )
+
+            # Stop subtitle progress thread
+            sub_stop.set()
+            sub_thread.join(timeout=1.0)
 
             if result.get("error"):
                 GLib.idle_add(self._emit_error, result["error"])
@@ -1867,8 +1946,17 @@ class GnomeSpeaksService:
                     spoke_anything = True
                     log.info("Streaming TTS sentence: %s", sentence[:80])
                     GLib.idle_add(self._emit_partial_transcription, sentence)
+                    _sf = 22.0 if self._voice_quality == "fast" else 15.0
+                    _sd = max(1.0, len(sentence) / _sf)
+                    _ss = threading.Event()
+                    _st = threading.Thread(
+                        target=self._run_subtitle_progress,
+                        args=(sentence, _sd, _ss), daemon=True)
+                    _st.start()
                     speech_tts.tts(sentence, quality=self._voice_quality,
                                    audio_level_cb=self._tts_level_cb)
+                    _ss.set()
+                    _st.join(timeout=1.0)
 
                     if self._stop_event.is_set():
                         break
@@ -1885,8 +1973,17 @@ class GnomeSpeaksService:
                 spoke_anything = True
                 log.info("Streaming TTS remainder: %s", remainder[:80])
                 GLib.idle_add(self._emit_partial_transcription, remainder)
+                _sf = 22.0 if self._voice_quality == "fast" else 15.0
+                _sd = max(1.0, len(remainder) / _sf)
+                _ss = threading.Event()
+                _st = threading.Thread(
+                    target=self._run_subtitle_progress,
+                    args=(remainder, _sd, _ss), daemon=True)
+                _st.start()
                 speech_tts.tts(remainder, quality=self._voice_quality,
                                audio_level_cb=self._tts_level_cb)
+                _ss.set()
+                _st.join(timeout=1.0)
 
             # --- Post-stream: history, type tags, state transitions ---
 
@@ -2042,10 +2139,23 @@ class GnomeSpeaksService:
                 if not CONFIG.get("half_duplex", False):
                     _schedule_warmup()
 
+                # Start subtitle progress thread for progressive reveal
+                _sf = 22.0 if self._voice_quality == "fast" else 15.0
+                _sd = max(1.0, len(speak_text) / _sf)
+                _ss = threading.Event()
+                _st = threading.Thread(
+                    target=self._run_subtitle_progress,
+                    args=(speak_text, _sd, _ss), daemon=True)
+                _st.start()
+
                 # Speak the reply, then go idle
                 log.info("Conversation reply: %s", speak_text[:100])
                 speech_tts.tts(speak_text, quality=self._voice_quality,
                                 audio_level_cb=self._tts_level_cb)
+
+                # Stop subtitle progress thread
+                _ss.set()
+                _st.join(timeout=1.0)
 
                 # Half-duplex drain: on speakers, wait for audio buffers to
                 # fully flush before opening mic. PipeWire/Pulse can buffer

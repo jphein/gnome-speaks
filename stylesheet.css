@@ -302,3 +302,53 @@
 .gnome-speaks-panel-speaking {
     color: rgba(180, 120, 255, 1.0);
 }
+
+/* ============================================================
+ * SUBTITLE OVERLAY — cinematic bottom-center display
+ * ============================================================ */
+
+.gnome-speaks-subtitle-overlay {
+    background-color: rgba(20, 12, 36, 0.85);
+    border-radius: 12px;
+    padding: 12px 24px;
+    min-width: 300px;
+    max-width: 800px;
+    border: 1px solid rgba(160, 120, 255, 0.12);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5),
+                0 0 12px rgba(140, 80, 230, 0.08);
+}
+
+.gnome-speaks-subtitle-text {
+    font-size: 18px;
+    font-weight: 400;
+    color: rgba(232, 220, 200, 0.95);
+    text-align: center;
+}
+
+/* -- Color variants for subtitle_color setting -- */
+
+.gnome-speaks-subtitle-gold .gnome-speaks-subtitle-text {
+    color: #d4a574;
+}
+
+.gnome-speaks-subtitle-green .gnome-speaks-subtitle-text {
+    color: #6eb86e;
+}
+
+.gnome-speaks-subtitle-amber .gnome-speaks-subtitle-text {
+    color: #d4a574;
+}
+
+.gnome-speaks-subtitle-cyan .gnome-speaks-subtitle-text {
+    color: #88ccdd;
+}
+
+/* -- Partial (live) vs final transcription styling -- */
+
+.gnome-speaks-subtitle-partial .gnome-speaks-subtitle-text {
+    font-style: italic;
+}
+
+.gnome-speaks-subtitle-final .gnome-speaks-subtitle-text {
+    font-weight: 500;
+}

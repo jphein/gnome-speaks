@@ -104,6 +104,11 @@ const DBUS_XML = `
     <signal name="PartialTranscription">
       <arg type="s" name="text"/>
     </signal>
+    <signal name="SubtitleUpdate">
+      <arg type="s" name="text"/>
+      <arg type="d" name="duration"/>
+      <arg type="i" name="percent"/>
+    </signal>
     <signal name="AudioLevel">
       <arg type="d" name="level"/>
     </signal>
@@ -176,6 +181,9 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badgeVisible = true;
         this._audioLevel = 0;
         this._lastAudioLevelTime = 0;
+        this._lastPartialTime = 0;
+        this._subtitleText = '';
+        this._subtitleVisible = false;
         this._settings = this.getSettings();
 
         // Restore persisted badge position
@@ -185,6 +193,7 @@ export default class GnomeSpeaksExtension extends Extension {
             ? {x: savedX, y: savedY} : null;
 
         this._createBadge();
+        this._createSubtitleOverlay();
         this._createPanelIndicator();
         this._positionBadge();
         this._connectLayoutSignals();
@@ -236,6 +245,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._removeKeybindings();
         this._disconnectLayoutSignals();
         this._disconnectProxy();
+        this._destroySubtitleOverlay();
         this._destroyPanelIndicator();
         this._destroyBadge();
 
@@ -598,6 +608,186 @@ export default class GnomeSpeaksExtension extends Extension {
         }
     }
 
+    // -- Subtitle overlay --------------------------------------------------
+
+    _createSubtitleOverlay() {
+        this._subtitleOverlay = new St.BoxLayout({
+            style_class: 'gnome-speaks-subtitle-overlay',
+            vertical: true,
+            reactive: false,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.END,
+        });
+
+        this._subtitleLabel = new St.Label({
+            style_class: 'gnome-speaks-subtitle-text',
+            text: '',
+            x_align: Clutter.ActorAlign.CENTER,
+        });
+
+        // Enable word wrap on the underlying ClutterText
+        let clutterText = this._subtitleLabel.get_clutter_text();
+        clutterText.set_line_wrap(true);
+        clutterText.set_line_wrap_mode(0); // PANGO_WRAP_WORD
+        clutterText.set_ellipsize(0); // PANGO_ELLIPSIZE_NONE
+
+        this._subtitleOverlay.add_child(this._subtitleLabel);
+
+        // Apply color variant from settings
+        this._applySubtitleColor();
+
+        // Start hidden
+        this._subtitleOverlay.opacity = 0;
+        this._subtitleOverlay.hide();
+        this._subtitleVisible = false;
+
+        Main.uiGroup.add_child(this._subtitleOverlay);
+
+        this._positionSubtitleOverlay();
+
+        // Listen for settings changes
+        if (this._settings) {
+            let colorChangedId = this._settings.connect('changed::subtitle-color', () => {
+                this._applySubtitleColor();
+            });
+            this._signals.push({obj: this._settings, id: colorChangedId});
+        }
+    }
+
+    _applySubtitleColor() {
+        if (!this._subtitleOverlay || !this._settings)
+            return;
+
+        // Remove existing color classes
+        let colors = ['cream', 'gold', 'green', 'amber', 'cyan'];
+        for (let c of colors)
+            this._subtitleOverlay.remove_style_class_name(`gnome-speaks-subtitle-${c}`);
+
+        let color = this._settings.get_string('subtitle-color');
+        if (color && color !== 'cream')
+            this._subtitleOverlay.add_style_class_name(`gnome-speaks-subtitle-${color}`);
+    }
+
+    _positionSubtitleOverlay() {
+        if (!this._subtitleOverlay)
+            return;
+
+        let monitor = Main.layoutManager.primaryMonitor;
+        if (!monitor)
+            return;
+
+        // Position centered horizontally, 100px from bottom
+        let overlayWidth = Math.min(800, monitor.width - 80);
+        let x = monitor.x + Math.round((monitor.width - overlayWidth) / 2);
+        let y = monitor.y + monitor.height - 100 - 60; // 100px from bottom, ~60px for overlay height
+
+        this._subtitleOverlay.set_position(x, y);
+        this._subtitleOverlay.set_width(overlayWidth);
+    }
+
+    _showSubtitle(text, isPartial = false) {
+        if (this._destroyed)
+            return;
+
+        // Respect live_subtitles setting
+        if (this._settings && !this._settings.get_boolean('live-subtitles'))
+            return;
+
+        if (!this._subtitleOverlay || !this._subtitleLabel)
+            return;
+
+        // Smart text display: sliding window for very long text
+        let displayText = text;
+        if (displayText.length > 300) {
+            // Show last ~200 chars, word-aligned
+            let start = displayText.length - 200;
+            let spaceIdx = displayText.indexOf(' ', start);
+            if (spaceIdx > 0 && spaceIdx < start + 30)
+                start = spaceIdx + 1;
+            displayText = `...${displayText.substring(start)}`;
+        }
+
+        this._subtitleText = displayText;
+        this._subtitleLabel.text = displayText;
+
+        // Apply partial/final style
+        this._subtitleOverlay.remove_style_class_name('gnome-speaks-subtitle-partial');
+        this._subtitleOverlay.remove_style_class_name('gnome-speaks-subtitle-final');
+        this._subtitleOverlay.add_style_class_name(
+            isPartial ? 'gnome-speaks-subtitle-partial' : 'gnome-speaks-subtitle-final');
+
+        // Reposition in case the monitor changed
+        this._positionSubtitleOverlay();
+
+        // Cancel any pending fade-out
+        this._cancelTimeout('subtitle-fadeout');
+
+        if (!this._subtitleVisible) {
+            // Fade in
+            this._subtitleOverlay.show();
+            this._subtitleOverlay.remove_all_transitions();
+            this._subtitleOverlay.ease({
+                opacity: 255,
+                duration: 300,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+            this._subtitleVisible = true;
+        }
+    }
+
+    _hideSubtitle(immediate = false) {
+        if (!this._subtitleOverlay || !this._subtitleVisible)
+            return;
+
+        if (immediate) {
+            this._subtitleOverlay.remove_all_transitions();
+            this._subtitleOverlay.opacity = 0;
+            this._subtitleOverlay.hide();
+            this._subtitleVisible = false;
+            this._subtitleText = '';
+            return;
+        }
+
+        // Fade out over 500ms
+        this._subtitleOverlay.remove_all_transitions();
+        this._subtitleOverlay.ease({
+            opacity: 0,
+            duration: 500,
+            mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            onComplete: () => {
+                if (this._subtitleOverlay && !this._destroyed) {
+                    this._subtitleOverlay.hide();
+                    this._subtitleVisible = false;
+                    this._subtitleText = '';
+                }
+            },
+        });
+    }
+
+    _scheduleSubtitleFadeout(delayMs = 3000) {
+        this._cancelTimeout('subtitle-fadeout');
+        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
+            if (!this._destroyed)
+                this._hideSubtitle();
+            this._removeTimeout('subtitle-fadeout');
+            return GLib.SOURCE_REMOVE;
+        });
+        this._trackTimeout(timeoutId, 'subtitle-fadeout');
+    }
+
+    _destroySubtitleOverlay() {
+        this._cancelTimeout('subtitle-fadeout');
+        if (this._subtitleOverlay) {
+            this._subtitleOverlay.remove_all_transitions();
+            Main.uiGroup.remove_child(this._subtitleOverlay);
+            this._subtitleOverlay.destroy();
+            this._subtitleOverlay = null;
+            this._subtitleLabel = null;
+        }
+        this._subtitleVisible = false;
+        this._subtitleText = '';
+    }
+
     _updateAudioInfoMenu(info) {
         if (!this._menuAudioInfoItem)
             return;
@@ -885,6 +1075,7 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._settings.set_int('badge-position-y', -1);
             }
             this._positionBadge();
+            this._positionSubtitleOverlay();
         });
         this._layoutSignalId = monitorId;
     }
@@ -945,6 +1136,11 @@ export default class GnomeSpeaksExtension extends Extension {
             this._showPartialTranscription(text);
         });
         this._proxySignals.push(partialId);
+
+        let subtitleUpdateId = this._proxy.connectSignal('SubtitleUpdate', (proxy, sender, [text, duration, percent]) => {
+            this._onSubtitleUpdate(text, duration, percent);
+        });
+        this._proxySignals.push(subtitleUpdateId);
 
         let audioLevelId = this._proxy.connectSignal('AudioLevel', (proxy, sender, [level]) => {
             this._onAudioLevel(level);
@@ -1119,6 +1315,19 @@ export default class GnomeSpeaksExtension extends Extension {
             this._stopPulse();
         }
 
+        // Subtitle overlay state management:
+        // - IDLE: schedule a graceful 3s fade-out (don't hide immediately)
+        // - PROCESSING: keep subtitles visible (transcription just finished)
+        // - LISTENING/SPEAKING: subtitles managed by their signal handlers
+        if (newState === States.IDLE) {
+            // Don't immediately hide — schedule a gentle fade-out
+            if (this._subtitleVisible)
+                this._scheduleSubtitleFadeout(3000);
+        } else if (newState === States.PROCESSING) {
+            // Keep transcription visible while processing
+            this._cancelTimeout('subtitle-fadeout');
+        }
+
         // Reposition badge if going to/from idle (size changes)
         if ((oldState === States.IDLE && newState !== States.IDLE) ||
             (oldState !== States.IDLE && newState === States.IDLE)) {
@@ -1267,9 +1476,9 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _showPartialTranscription(text) {
-        if (this._destroyed || !this._badge || !this._label)
+        if (this._destroyed)
             return;
-        if (this._state !== 'listening' && this._state !== 'speaking')
+        if (this._state !== States.LISTENING && this._state !== States.SPEAKING)
             return;
 
         // Debounce: skip if last update was < 50ms ago
@@ -1278,41 +1487,85 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         this._lastPartialTime = now;
 
-        let displayText = text;
-        if (displayText.length > 50)
-            displayText = `...${displayText.substring(displayText.length - 47)}`;
+        // Show in the subtitle overlay (full text, no truncation)
+        this._showSubtitle(text, true);
 
-        this._label.text = displayText;
-        this._label.show();
+        // Also show a short version in the badge label for at-a-glance feedback
+        if (this._badge && this._label) {
+            let badgeText = text;
+            if (badgeText.length > 50)
+                badgeText = `...${badgeText.substring(badgeText.length - 47)}`;
+            this._label.text = badgeText;
+            this._label.show();
+        }
+    }
+
+    _onSubtitleUpdate(text, duration, percent) {
+        if (this._destroyed)
+            return;
+        if (this._state !== States.SPEAKING)
+            return;
+
+        // Progressive reveal: show text up to the current estimated position
+        let charPos = Math.floor((percent / 100.0) * text.length);
+        let revealed = text.substring(0, charPos);
+
+        if (revealed.length > 0) {
+            // Show full revealed text in the subtitle overlay
+            this._showSubtitle(revealed, true);
+
+            // Short version for badge label
+            if (this._badge && this._label) {
+                let badgeText = revealed;
+                if (badgeText.length > 50)
+                    badgeText = `...${badgeText.substring(badgeText.length - 47)}`;
+                this._label.text = badgeText;
+                this._label.show();
+            }
+        }
+
+        // When reveal reaches 100%, schedule fade-out
+        if (percent >= 100) {
+            this._showSubtitle(text, false);
+            this._scheduleSubtitleFadeout(2000);
+        }
     }
 
     _showTranscription(text) {
-        if (!this._badge || !this._label)
+        if (this._destroyed)
             return;
 
-        let displayText = text;
-        if (displayText.length > 60)
-            displayText = `${displayText.substring(0, 57)}...`;
+        // Show in the subtitle overlay — final, non-italic style
+        this._showSubtitle(text, false);
 
-        this._label.text = displayText;
-        this._label.show();
+        // Schedule fade-out after 3 seconds
+        this._scheduleSubtitleFadeout(3000);
 
-        // Cancel any existing transcription fade-out
-        this._cancelTimeout('transcription');
+        // Also update badge label briefly
+        if (this._badge && this._label) {
+            let badgeText = text;
+            if (badgeText.length > 60)
+                badgeText = `${badgeText.substring(0, 57)}...`;
 
-        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
-            if (this._destroyed || !this._badge || !this._label)
+            this._label.text = badgeText;
+            this._label.show();
+
+            // Cancel any existing badge transcription fade-out
+            this._cancelTimeout('transcription');
+
+            let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
+                if (this._destroyed || !this._badge || !this._label)
+                    return GLib.SOURCE_REMOVE;
+
+                if (this._state === States.IDLE) {
+                    this._label.text = '';
+                    this._label.hide();
+                }
+                this._removeTimeout('transcription');
                 return GLib.SOURCE_REMOVE;
-
-            // Only hide if we're still showing transcription (i.e., back to idle)
-            if (this._state === States.IDLE) {
-                this._label.text = '';
-                this._label.hide();
-            }
-            this._removeTimeout('transcription');
-            return GLib.SOURCE_REMOVE;
-        });
-        this._trackTimeout(timeoutId, 'transcription');
+            });
+            this._trackTimeout(timeoutId, 'transcription');
+        }
     }
 
     _showError(message) {
@@ -1358,6 +1611,7 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _showContextMenu(event) {
+        if (!this._badge) return;
         this._destroyContextMenu();
 
         this._contextMenu = new St.BoxLayout({

@@ -2769,18 +2769,23 @@ def main():
     # Start inactivity timer
     service._reset_inactivity_timer()
 
-    # Start HTTP REST API server
+    # Start HTTP REST API server (optional — gracefully skip if port in use)
+    http_server = None
     SpeechHTTPHandler.service = service
-    http_server = http.server.ThreadingHTTPServer(
-        ("127.0.0.1", args.http_port), SpeechHTTPHandler,
-    )
-    threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    log.info("HTTP server listening on http://127.0.0.1:%d", args.http_port)
+    try:
+        http_server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", args.http_port), SpeechHTTPHandler,
+        )
+        threading.Thread(target=http_server.serve_forever, daemon=True).start()
+        log.info("HTTP server listening on http://127.0.0.1:%d", args.http_port)
+    except OSError as e:
+        log.warning("HTTP server failed to start on port %d: %s (continuing without HTTP)", args.http_port, e)
 
     # Handle SIGTERM/SIGINT
     def _on_signal(signum):
         log.info("Received signal %d, shutting down", signum)
-        http_server.shutdown()
+        if http_server:
+            http_server.shutdown()
         service.shutdown()
         loop.quit()
         return GLib.SOURCE_REMOVE
@@ -2793,7 +2798,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        http_server.shutdown()
+        if http_server:
+            http_server.shutdown()
         service.shutdown()
         Gio.bus_unown_name(owner_id)
         log.info("Exited cleanly")

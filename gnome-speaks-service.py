@@ -793,7 +793,7 @@ class GnomeSpeaksService:
             _schedule_warmup()
 
             if user_text and CONFIG.get("continuous_dictation", False) and not self._stop_event.is_set():
-                GLib.idle_add(lambda: self.start_listening(quick=True)
+                GLib.idle_add(lambda: (self.start_listening(quick=True), False)[-1]
                               if (CONFIG.get("continuous_dictation", False)
                                   and not self._stop_event.is_set())
                               else False)
@@ -1335,7 +1335,7 @@ class GnomeSpeaksService:
                     and CONFIG.get("conversation_mode", False)
                     and not self._stop_event.is_set()):
                 log.info("Hands-free: auto-restarting listening after TTS")
-                GLib.idle_add(lambda: self.start_listening(quick=True)
+                GLib.idle_add(lambda: (self.start_listening(quick=True), False)[-1]
                               if (CONFIG.get("continuous_dictation", False)
                                   and CONFIG.get("conversation_mode", False)
                                   and not self._stop_event.is_set())
@@ -1712,7 +1712,7 @@ class GnomeSpeaksService:
             # audio detection since nothing changed within the loop.
             # Use GLib.idle_add because start_listening touches state
             # that must be set from the main thread context.
-            GLib.idle_add(lambda: self.start_listening(quick=True)
+            GLib.idle_add(lambda: (self.start_listening(quick=True), False)[-1]
                           if not self._stop_event.is_set()
                           else False)
         else:
@@ -2033,7 +2033,7 @@ class GnomeSpeaksService:
                     and not self._stop_event.is_set()):
                 log.info("AI+Loop: retry after error (2s delay)")
                 GLib.timeout_add(2000, lambda: (
-                    self.start_listening(quick=True)
+                    (self.start_listening(quick=True), False)[-1]
                     if not self._stop_event.is_set()
                     else False
                 ))
@@ -2204,7 +2204,7 @@ class GnomeSpeaksService:
                     and not self._stop_event.is_set()):
                 log.info("AI+Loop: retry after error (2s delay)")
                 GLib.timeout_add(2000, lambda: (
-                    self.start_listening(quick=True)
+                    (self.start_listening(quick=True), False)[-1]
                     if not self._stop_event.is_set()
                     else False
                 ))

@@ -1490,14 +1490,6 @@ export default class GnomeSpeaksExtension extends Extension {
         // Show in the subtitle overlay (full text, no truncation)
         this._showSubtitle(text, true);
 
-        // Also show a short version in the badge label for at-a-glance feedback
-        if (this._badge && this._label) {
-            let badgeText = text;
-            if (badgeText.length > 50)
-                badgeText = `...${badgeText.substring(badgeText.length - 47)}`;
-            this._label.text = badgeText;
-            this._label.show();
-        }
     }
 
     _onSubtitleUpdate(text, duration, percent) {
@@ -1514,14 +1506,6 @@ export default class GnomeSpeaksExtension extends Extension {
             // Show full revealed text in the subtitle overlay
             this._showSubtitle(revealed, true);
 
-            // Short version for badge label
-            if (this._badge && this._label) {
-                let badgeText = revealed;
-                if (badgeText.length > 50)
-                    badgeText = `...${badgeText.substring(badgeText.length - 47)}`;
-                this._label.text = badgeText;
-                this._label.show();
-            }
         }
 
         // When reveal reaches 100%, schedule fade-out
@@ -1541,31 +1525,6 @@ export default class GnomeSpeaksExtension extends Extension {
         // Schedule fade-out after 3 seconds
         this._scheduleSubtitleFadeout(3000);
 
-        // Also update badge label briefly
-        if (this._badge && this._label) {
-            let badgeText = text;
-            if (badgeText.length > 60)
-                badgeText = `${badgeText.substring(0, 57)}...`;
-
-            this._label.text = badgeText;
-            this._label.show();
-
-            // Cancel any existing badge transcription fade-out
-            this._cancelTimeout('transcription');
-
-            let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
-                if (this._destroyed || !this._badge || !this._label)
-                    return GLib.SOURCE_REMOVE;
-
-                if (this._state === States.IDLE) {
-                    this._label.text = '';
-                    this._label.hide();
-                }
-                this._removeTimeout('transcription');
-                return GLib.SOURCE_REMOVE;
-            });
-            this._trackTimeout(timeoutId, 'transcription');
-        }
     }
 
     _showError(message) {

@@ -925,8 +925,15 @@ class GnomeSpeaksService:
                     silence_frames = 0
                     speech_frames = 0
                     total_frames = 0
-                    # In loop mode, use tighter silence timeout for faster turnaround
-                    silence_sec = CONFIG.get("loop_silence_timeout", 1.2) if is_loop else state.SILENCE_TIMEOUT
+                    # In loop mode, use tighter silence timeout for faster turnaround.
+                    # Conversation mode gets a longer timeout (2.5s default) since
+                    # natural speech has longer thinking pauses than dictation (1.2s).
+                    if is_loop and CONFIG.get("conversation_mode", False):
+                        silence_sec = CONFIG.get("conversation_silence_timeout", 2.5)
+                    elif is_loop:
+                        silence_sec = CONFIG.get("loop_silence_timeout", 1.2)
+                    else:
+                        silence_sec = state.SILENCE_TIMEOUT
                     max_silence = int(silence_sec * 1000 / FRAME_MS)
                     max_no_speech = int(state.NO_SPEECH_TIMEOUT * 1000 / FRAME_MS)
                     min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)
@@ -1097,6 +1104,15 @@ class GnomeSpeaksService:
                 user_text = apply_auto_corrections(user_text)
 
             # 9. Emit results and type/copy
+            # In loop mode, skip the "processing" flicker if nothing was said —
+            # just silently re-enter listening on the next cycle.
+            if is_loop and not user_text and not self._stop_event.is_set():
+                if live_typing and typed_partial[0]:
+                    _send_backspaces(len(typed_partial[0]))
+                _log("no speech in loop cycle, continuing")
+                self._set_state("listening")
+                continue
+
             self._set_state("processing")
             if user_text:
                 GLib.idle_add(self._emit_transcription_ready, user_text)
@@ -2010,6 +2026,17 @@ class GnomeSpeaksService:
             log.exception("Streaming conversation failed: %s", exc)
             GLib.idle_add(self._emit_error, f"LLM error: {exc}")
             self._set_state("idle")
+            # Still try to restart the loop after a brief delay so a transient
+            # error (network blip, rate limit) doesn't kill the conversation.
+            if (CONFIG.get("continuous_dictation", False)
+                    and CONFIG.get("conversation_mode", False)
+                    and not self._stop_event.is_set()):
+                log.info("AI+Loop: retry after error (2s delay)")
+                GLib.timeout_add(2000, lambda: (
+                    self.start_listening(quick=True)
+                    if not self._stop_event.is_set()
+                    else False
+                ))
 
     # -- SSE token iterators per provider ----------------------------------
 
@@ -2171,6 +2198,16 @@ class GnomeSpeaksService:
             log.exception("Conversation failed: %s", exc)
             GLib.idle_add(self._emit_error, f"LLM error: {exc}")
             self._set_state("idle")
+            # Retry loop after transient error
+            if (CONFIG.get("continuous_dictation", False)
+                    and CONFIG.get("conversation_mode", False)
+                    and not self._stop_event.is_set()):
+                log.info("AI+Loop: retry after error (2s delay)")
+                GLib.timeout_add(2000, lambda: (
+                    self.start_listening(quick=True)
+                    if not self._stop_event.is_set()
+                    else False
+                ))
 
     def _load_cca_config(self):
         """Load cloud-chat-assistant config."""

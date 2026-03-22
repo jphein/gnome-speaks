@@ -112,65 +112,79 @@ MODEL_MAP = {
         "digitalocean": "anthropic-claude-opus-4.6",
         "bedrock":      "claude-opus-4.6",
         "openai":       "claude-opus-4.6",
+        "puter":        "claude-opus-4-6",
     },
     "claude-sonnet-4.6": {
         "anthropic":    "claude-sonnet-4-6",
         "digitalocean": "anthropic-claude-4.6-sonnet",
         "bedrock":      "claude-sonnet-4.6",
+        "puter":        "claude-sonnet-4-6",
     },
     "claude-haiku-4.5": {
         "anthropic":    "claude-haiku-4-5-20251001",
         "digitalocean": "anthropic-claude-haiku-4.5",
         "bedrock":      "claude-haiku-4.5",
+        "puter":        "claude-haiku-4-5-20251001",
     },
     "claude-opus-4.5": {
         "anthropic":    "claude-opus-4-5-20251101",
         "digitalocean": "anthropic-claude-opus-4.5",
         "bedrock":      "claude-opus-4.5",
+        "puter":        "claude-opus-4-5-20251101",
     },
     "claude-sonnet-4.5": {
         "anthropic":    "claude-sonnet-4-5-20250929",
         "digitalocean": "anthropic-claude-4.5-sonnet",
         "bedrock":      "claude-sonnet-4.5",
+        "puter":        "claude-sonnet-4-5-20250929",
     },
     # ── OpenAI ────────────────────────────────────────────────────────
     "gpt-4o": {
         "openai":       "gpt-4o",
         "digitalocean": "openai-gpt-4o",
         "azure":        "gpt-4o",
+        "puter":        "gpt-4o",
     },
     "gpt-4o-mini": {
         "openai":       "gpt-4o-mini",
         "digitalocean": "openai-gpt-4o-mini",
         "azure":        "gpt-4o-mini",
+        "puter":        "gpt-4o-mini",
     },
     "o4-mini": {
         "openai":       "o4-mini",
         "digitalocean": "openai-o3-mini",
+        "puter":        "o4-mini",
     },
     "gpt-5.3": {
         "openai":       "gpt-5.3-chat",
         "digitalocean": "openai-gpt-5.3-codex",
+        "puter":        "gpt-5.2-chat-latest",
     },
     # ── Meta Llama ────────────────────────────────────────────────────
     "llama-3.3-70b": {
         "digitalocean": "llama3.3-70b-instruct",
         "azure":        "Llama-3.3-70B-Instruct",
         "bedrock":      "llama4-scout-17b",
+        "puter":        "openrouter:meta-llama/llama-3.3-70b-instruct",
     },
     # ── Other ─────────────────────────────────────────────────────────
     "deepseek-r1": {
         "digitalocean": "deepseek-r1-distill-llama-70b",
         "azure":        "DeepSeek-R1",
+        "puter":        "deepseek-reasoner",
     },
     "grok-3": {
         "azure":        "grok-3",
+        "puter":        "grok-3",
     },
     "gemini-2.5-flash": {
         "google":       "gemini-2.5-flash",
+        "puter":        "gemini-2.5-flash",
     },
     "gemini-2.5-pro": {
         "google":       "gemini-2.5-pro",
+        "puter":        "gemini-2.5-pro",
     },
 }
 

@@ -1402,7 +1402,10 @@ class GnomeSpeaksService:
             sub_thread.start()
 
             result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
-                                    audio_level_cb=self._tts_level_cb)
+                                    audio_level_cb=self._tts_level_cb,
+                                    output_file=getattr(self, '_pending_output_file', None))
+            # Clear one-shot output file after use
+            self._pending_output_file = None
 
             # Stop subtitle progress thread
             sub_stop.set()
@@ -2588,6 +2591,10 @@ class SpeechHTTPHandler(http.server.BaseHTTPRequestHandler):
         if body.get("quality") and body["quality"] in ("fast", "hd"):
             original_quality = svc._voice_quality
             svc._voice_quality = body["quality"]
+
+        # Set output file for save-to-disk (one-shot, cleared after use)
+        if body.get("output_file"):
+            svc._pending_output_file = body["output_file"]
 
         try:
             svc.speak(text)

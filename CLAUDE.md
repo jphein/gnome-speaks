@@ -1,3 +1,4 @@
+<!-- claude-md-version: c2e0cdd | updated: 2026-03-22 -->
 # CLAUDE.md — gnome-speaks
 
 GNOME Shell extension (v46-48) for desktop voice interaction: STT, TTS, and AI conversation via Azure Speech Services.

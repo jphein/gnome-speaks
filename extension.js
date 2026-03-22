@@ -498,7 +498,7 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         }
         this._proxy.ToggleVoiceQualityRemote((result, error) => {
-            if (error) return;
+            if (this._destroyed || error) return;
             let quality = result[0];
             this._voiceQuality = quality;
             this._updateQualityPill();
@@ -526,7 +526,7 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         }
         this._proxy.ToggleConversationModeRemote((result, error) => {
-            if (error) return;
+            if (this._destroyed || error) return;
             let enabled = result[0];
             this._conversationMode = enabled;
             this._updateModePill();
@@ -561,7 +561,7 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         }
         this._proxy.ToggleContinuousDictationRemote((result, error) => {
-            if (error) return;
+            if (this._destroyed || error) return;
             this._continuousMode = result[0];
             this._updateContinuousPill();
             if (this._menuContinuousToggle)
@@ -584,7 +584,7 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         }
         this._proxy.ToggleTerminalModeRemote((result, error) => {
-            if (error) return;
+            if (this._destroyed || error) return;
             this._terminalMode = result[0];
             this._updateTerminalPill();
         });
@@ -900,7 +900,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._menuConversationToggle.connect('toggled', (item, state) => {
             if (!this._proxy) return;
             this._proxy.ToggleConversationModeRemote((result, error) => {
-                if (error) return;
+                if (this._destroyed || error) return;
                 let enabled = result[0];
                 this._conversationMode = enabled;
                 this._updateModePill();
@@ -963,6 +963,12 @@ export default class GnomeSpeaksExtension extends Extension {
             this.openPreferences();
         });
         menu.addMenuItem(settingsItem);
+
+        let disableItem = new PopupMenu.PopupMenuItem('Disable Extension');
+        disableItem.connect('activate', () => {
+            Main.extensionManager.disableExtension(this.uuid);
+        });
+        menu.addMenuItem(disableItem);
     }
 
     _updatePanelMenu() {
@@ -1407,6 +1413,9 @@ export default class GnomeSpeaksExtension extends Extension {
             this._pulseNextId = null;
         }
 
+        // Cancel any pending audio-level pulse resume
+        this._cancelTimeout('audio-pulse-resume');
+
         if (!this._badge || this._destroyed)
             return;
 
@@ -1560,13 +1569,36 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         this._lastAudioLevelTime = now;
 
-        // Set scale directly (no ease) to avoid conflicting with pulse
-        // animation — concurrent ease() calls on the same property can
-        // cause GL errors on NVIDIA proprietary drivers.
+        // Suspend pulse animation while audio levels drive the scale,
+        // otherwise ease() and set_scale() fight over the same property
+        // causing rapid jiggling.
+        if (this._pulseActive) {
+            this._pulseActive = false;
+            if (this._pulseNextId) {
+                try { GLib.Source.remove(this._pulseNextId); } catch (e) { /* already fired */ }
+                this._pulseNextId = null;
+            }
+            this._badge.remove_all_transitions();
+        }
+
+        // Set scale directly (no ease) to avoid GL errors on NVIDIA
+        // proprietary drivers from concurrent ease() calls.
         let baseScale = 1.0;
         let levelBoost = Math.min(level, 1.0) * 0.12;
         let targetScale = baseScale + levelBoost;
         this._badge.set_scale(targetScale, targetScale);
+
+        // Resume pulse after 300ms of silence
+        this._cancelTimeout('audio-pulse-resume');
+        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            this._removeTimeout('audio-pulse-resume');
+            if (!this._destroyed && this._badge &&
+                (this._state === States.LISTENING || this._state === States.SPEAKING)) {
+                this._startPulse();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+        this._trackTimeout(timeoutId, 'audio-pulse-resume');
     }
 
     _showContextMenu(event) {

@@ -1862,6 +1862,33 @@ class GnomeSpeaksService:
                 resp.raise_for_status()
                 token_iter = self._iter_openai_tokens(resp)  # Azure uses OpenAI SSE format
 
+            elif provider == "digitalocean":
+                do_key = api_key or self._load_cca_config().get("do_api_key", "")
+                if not do_key:
+                    GLib.idle_add(self._emit_error, "No DigitalOcean API key configured")
+                    self._set_state("idle")
+                    return
+                msgs = [{"role": "system", "content": system_prompt}]
+                msgs.extend(history)
+                msgs.append({"role": "user", "content": user_text})
+                resp = http_requests.post(
+                    "https://inference.do-ai.run/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {do_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": msgs,
+                        "max_completion_tokens": max(256, 1024),
+                        "stream": True,
+                    },
+                    timeout=60,
+                    stream=True,
+                )
+                resp.raise_for_status()
+                token_iter = self._iter_openai_tokens(resp)
+
             elif provider == "google":
                 cca_config = self._load_cca_config()
                 google_key = cca_config.get("google_api_key", "")
@@ -2111,7 +2138,7 @@ class GnomeSpeaksService:
         # Streaming is supported for direct API providers.
         # cloud-chat-assistant/bedrock use an async call_llm that doesn't
         # support streaming, so fall back to the synchronous path.
-        if provider in ("anthropic", "openai", "azure", "google"):
+        if provider in ("anthropic", "openai", "azure", "google", "digitalocean"):
             return self._stream_conversation_worker(user_text)
 
         # --- Synchronous fallback for cloud-chat-assistant / bedrock ---

@@ -97,6 +97,91 @@ BUS_NAME = "org.gnome.Speaks"
 OBJECT_PATH = "/org/gnome/Speaks"
 INTERFACE_NAME = "org.gnome.Speaks"
 
+# ---------------------------------------------------------------------------
+# Model name mapping: canonical ID → provider-specific API string
+# ---------------------------------------------------------------------------
+# The prefs UI stores canonical IDs (e.g. "claude-opus-4.6").  Each provider
+# needs a different string for the same model.  _resolve_model() looks up the
+# canonical ID here and returns the provider-specific string, falling back to
+# the canonical ID if no mapping exists (custom / already-correct values).
+
+MODEL_MAP = {
+    # ── Anthropic Claude ──────────────────────────────────────────────
+    "claude-opus-4.6": {
+        "anthropic":    "claude-opus-4-6",
+        "digitalocean": "anthropic-claude-opus-4.6",
+        "bedrock":      "claude-opus-4.6",
+        "openai":       "claude-opus-4.6",
+    },
+    "claude-sonnet-4.6": {
+        "anthropic":    "claude-sonnet-4-6",
+        "digitalocean": "anthropic-claude-4.6-sonnet",
+        "bedrock":      "claude-sonnet-4.6",
+    },
+    "claude-haiku-4.5": {
+        "anthropic":    "claude-haiku-4-5-20251001",
+        "digitalocean": "anthropic-claude-haiku-4.5",
+        "bedrock":      "claude-haiku-4.5",
+    },
+    "claude-opus-4.5": {
+        "anthropic":    "claude-opus-4-5-20251101",
+        "digitalocean": "anthropic-claude-opus-4.5",
+        "bedrock":      "claude-opus-4.5",
+    },
+    "claude-sonnet-4.5": {
+        "anthropic":    "claude-sonnet-4-5-20250929",
+        "digitalocean": "anthropic-claude-4.5-sonnet",
+        "bedrock":      "claude-sonnet-4.5",
+    },
+    # ── OpenAI ────────────────────────────────────────────────────────
+    "gpt-4o": {
+        "openai":       "gpt-4o",
+        "digitalocean": "openai-gpt-4o",
+        "azure":        "gpt-4o",
+    },
+    "gpt-4o-mini": {
+        "openai":       "gpt-4o-mini",
+        "digitalocean": "openai-gpt-4o-mini",
+        "azure":        "gpt-4o-mini",
+    },
+    "o4-mini": {
+        "openai":       "o4-mini",
+        "digitalocean": "openai-o3-mini",
+    },
+    "gpt-5.3": {
+        "openai":       "gpt-5.3-chat",
+        "digitalocean": "openai-gpt-5.3-codex",
+    },
+    # ── Meta Llama ────────────────────────────────────────────────────
+    "llama-3.3-70b": {
+        "digitalocean": "llama3.3-70b-instruct",
+        "azure":        "Llama-3.3-70B-Instruct",
+        "bedrock":      "llama4-scout-17b",
+    },
+    # ── Other ─────────────────────────────────────────────────────────
+    "deepseek-r1": {
+        "digitalocean": "deepseek-r1-distill-llama-70b",
+        "azure":        "DeepSeek-R1",
+    },
+    "grok-3": {
+        "azure":        "grok-3",
+    },
+    "gemini-2.5-flash": {
+        "google":       "gemini-2.5-flash",
+    },
+    "gemini-2.5-pro": {
+        "google":       "gemini-2.5-pro",
+    },
+}
+
+
+def _resolve_model(canonical, provider):
+    """Return the provider-specific model string for a canonical model ID."""
+    mapping = MODEL_MAP.get(canonical)
+    if mapping:
+        return mapping.get(provider, canonical)
+    return canonical
+
 INACTIVITY_TIMEOUT_SEC = 600  # 10 minutes
 
 MAX_LISTEN_SECONDS = 30
@@ -1770,7 +1855,7 @@ class GnomeSpeaksService:
 
             api_key = CONFIG.get("llm_api_key", "")
             provider = CONFIG.get("llm_provider", "anthropic")
-            model = CONFIG.get("llm_model", "claude-opus-4-6")
+            model = _resolve_model(CONFIG.get("llm_model", "claude-opus-4.6"), provider)
 
             system_prompt, history = self._build_context(user_text)
 
@@ -1915,6 +2000,33 @@ class GnomeSpeaksService:
                 )
                 resp.raise_for_status()
                 token_iter = self._iter_google_tokens(resp)
+
+            elif provider == "puter":
+                puter_key = api_key or self._load_cca_config().get("puter_auth_token", "")
+                if not puter_key:
+                    GLib.idle_add(self._emit_error, "No Puter auth token configured")
+                    self._set_state("idle")
+                    return
+                msgs = [{"role": "system", "content": system_prompt}]
+                msgs.extend(history)
+                msgs.append({"role": "user", "content": user_text})
+                resp = http_requests.post(
+                    "https://api.puter.com/puterai/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {puter_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": msgs,
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                    timeout=60,
+                    stream=True,
+                )
+                resp.raise_for_status()
+                token_iter = self._iter_openai_tokens(resp)  # Puter uses OpenAI SSE format
 
             else:
                 GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
@@ -2138,7 +2250,7 @@ class GnomeSpeaksService:
         # Streaming is supported for direct API providers.
         # cloud-chat-assistant/bedrock use an async call_llm that doesn't
         # support streaming, so fall back to the synchronous path.
-        if provider in ("anthropic", "openai", "azure", "google", "digitalocean"):
+        if provider in ("anthropic", "openai", "azure", "google", "digitalocean", "puter"):
             return self._stream_conversation_worker(user_text)
 
         # --- Synchronous fallback for cloud-chat-assistant / bedrock ---
@@ -2146,7 +2258,7 @@ class GnomeSpeaksService:
             import requests as http_requests
 
             api_key = CONFIG.get("llm_api_key", "")
-            model = CONFIG.get("llm_model", "claude-opus-4-6")
+            model = _resolve_model(CONFIG.get("llm_model", "claude-opus-4.6"), provider)
 
             # Build system prompt with dynamic context + conversation history
             system_prompt, history = self._build_context(user_text)

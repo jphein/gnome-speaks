@@ -1,5 +1,11 @@
+# Python
 __pycache__/
 *.pyc
+
+# Build output
 schemas/gschemas.compiled
 build/
 builddir/
+
+# Tooling
+.claude/

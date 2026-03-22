@@ -141,6 +141,7 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addComboRow(aiGroup, 'LLM Provider', 'llm_provider', [
             ['anthropic', 'Anthropic (Claude)'],
             ['openai', 'OpenAI (GPT)'],
+            ['digitalocean', 'DigitalOcean'],
             ['azure', 'Azure AI Foundry'],
             ['bedrock', 'AWS Bedrock'],
             ['google', 'Google Vertex AI'],
@@ -148,16 +149,29 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         ], 'anthropic');
 
         this._addComboRow(aiGroup, 'LLM Model', 'llm_model', [
+            // Anthropic direct
             ['claude-opus-4-6', 'Claude Opus 4.6'],
             ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
             ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5'],
+            // OpenAI direct
             ['gpt-4o', 'GPT-4o'],
             ['gpt-4o-mini', 'GPT-4o Mini'],
             ['o4-mini', 'o4-mini'],
             ['gpt-5.3-chat', 'GPT-5.3 Chat'],
+            // DigitalOcean
+            ['anthropic-claude-opus-4.6', 'DO: Claude Opus 4.6'],
+            ['anthropic-claude-4.6-sonnet', 'DO: Claude Sonnet 4.6'],
+            ['anthropic-claude-haiku-4.5', 'DO: Claude Haiku 4.5'],
+            ['openai-gpt-4o', 'DO: GPT-4o'],
+            ['openai-gpt-4o-mini', 'DO: GPT-4o Mini'],
+            ['openai-o3-mini', 'DO: o3-mini'],
+            ['llama3.3-70b-instruct', 'DO: Llama 3.3 70B'],
+            ['deepseek-r1-distill-llama-70b', 'DO: DeepSeek R1 70B'],
+            // Azure AI Foundry
             ['grok-3', 'Grok-3'],
             ['DeepSeek-R1', 'DeepSeek R1'],
             ['Llama-3.3-70B-Instruct', 'Llama 3.3 70B'],
+            // Google
             ['gemini-2.5-flash', 'Gemini 2.5 Flash'],
             ['gemini-2.5-pro', 'Gemini 2.5 Pro'],
         ], 'claude-opus-4-6');

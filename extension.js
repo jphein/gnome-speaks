@@ -1871,9 +1871,10 @@ export default class GnomeSpeaksExtension extends Extension {
             this._glowRing.set_scale(glowScale, glowScale);
         }
 
-        // Resume pulse + fade glow after 300ms of silence
+        // Resume pulse + fade glow after 800ms of silence (long enough to
+        // avoid jittery pulse/audio fighting from intermittent ambient noise)
         this._cancelTimeout('audio-pulse-resume');
-        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
             this._removeTimeout('audio-pulse-resume');
             if (this._destroyed || !this._badge) return GLib.SOURCE_REMOVE;
             // Fade glow out smoothly

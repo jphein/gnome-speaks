@@ -253,10 +253,14 @@ export default class GnomeSpeaksExtension extends Extension {
         this._disconnectNotificationReader();
         this._removeKeybindings();
         this._disconnectLayoutSignals();
-        this._disconnectProxy();
+
+        // Destroy UI actors BEFORE disconnecting proxy — actor destruction
+        // can trigger GC, and we need the proxy reference alive so GC
+        // doesn't try to finalize GjsDBusImplementation during the sweep.
         this._destroySubtitleOverlay();
         this._destroyPanelIndicator();
         this._destroyBadge();
+        this._disconnectProxy();
 
         this._state = null;
         this._proxyReady = false;
@@ -1138,31 +1142,37 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
 
         let stateChangedId = this._proxy.connectSignal('StateChanged', (proxy, sender, [state]) => {
+            if (this._destroyed) return;
             this._setState(state);
         });
         this._proxySignals.push(stateChangedId);
 
         let transcriptionId = this._proxy.connectSignal('TranscriptionReady', (proxy, sender, [text]) => {
+            if (this._destroyed) return;
             this._showTranscription(text);
         });
         this._proxySignals.push(transcriptionId);
 
         let partialId = this._proxy.connectSignal('PartialTranscription', (proxy, sender, [text]) => {
+            if (this._destroyed) return;
             this._showPartialTranscription(text);
         });
         this._proxySignals.push(partialId);
 
         let subtitleUpdateId = this._proxy.connectSignal('SubtitleUpdate', (proxy, sender, [text, duration, percent]) => {
+            if (this._destroyed) return;
             this._onSubtitleUpdate(text, duration, percent);
         });
         this._proxySignals.push(subtitleUpdateId);
 
         let audioLevelId = this._proxy.connectSignal('AudioLevel', (proxy, sender, [level]) => {
+            if (this._destroyed) return;
             this._onAudioLevel(level);
         });
         this._proxySignals.push(audioLevelId);
 
         let errorId = this._proxy.connectSignal('Error', (proxy, sender, [message]) => {
+            if (this._destroyed) return;
             this._showError(message);
         });
         this._proxySignals.push(errorId);
@@ -1180,7 +1190,15 @@ export default class GnomeSpeaksExtension extends Extension {
                 }
             }
             this._proxySignals = [];
+            // Prevent proxy from being GC'd during disable() — defer the
+            // reference drop to the next idle cycle so GjsDBusImplementation
+            // finalization doesn't trigger JS callbacks during the GC sweep.
+            let oldProxy = this._proxy;
             this._proxy = null;
+            GLib.idle_add(GLib.PRIORITY_LOW, () => {
+                void oldProxy;
+                return GLib.SOURCE_REMOVE;
+            });
         }
     }
 
@@ -1463,11 +1481,13 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _callMethod(methodName, ...args) {
+        if (this._destroyed) return;
         if (!this._proxy) {
             this._initProxy();
             let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-                if (this._proxy)
-                    this._callMethodInternal(methodName, ...args);
+                if (this._destroyed || !this._proxy)
+                    return GLib.SOURCE_REMOVE;
+                this._callMethodInternal(methodName, ...args);
                 return GLib.SOURCE_REMOVE;
             });
             this._trackTimeout(timeoutId);
@@ -1478,7 +1498,7 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _callMethodInternal(methodName, ...args) {
-        if (!this._proxy)
+        if (this._destroyed || !this._proxy)
             return;
 
         let remoteName = `${methodName}Remote`;
@@ -1488,6 +1508,7 @@ export default class GnomeSpeaksExtension extends Extension {
         }
 
         let callback = (result, error) => {
+            if (this._destroyed) return;
             if (error) {
                 log(`[GNOME Speaks] ${methodName} failed: ${error.message}`);
                 this._showError(`${methodName} failed`);

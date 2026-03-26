@@ -869,6 +869,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._destroyContextMenu();
 
         if (this._badge) {
+            this._badge.remove_all_transitions();
             Main.layoutManager.removeChrome(this._badge);
             this._badge.destroy();
             this._badge = null;

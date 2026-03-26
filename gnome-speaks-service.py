@@ -582,9 +582,25 @@ class GnomeSpeaksService:
 
     # Boolean flags that prefs.js can change on disk while the service runs.
     _SYNC_FLAGS = (
+        # Mode flags
         "conversation_mode", "continuous_dictation", "dictation_mode",
         "terminal_mode", "skip_final_paste", "read_notifications",
+        # LLM provider config
         "llm_provider", "llm_model", "llm_api_key", "llm_system_prompt",
+        # Chimes
+        "chime_ready", "chime_processing", "chime_speak", "chime_done",
+        "chime_hum", "chime_barge_in",
+        # TTS voice settings (read per-call by speech_tts.py)
+        "voice", "fast_voice",
+        # STT / timing
+        "language", "end_word", "voice_commands",
+        "silence_timeout", "no_speech_timeout", "loop_silence_timeout",
+        "conversation_silence_timeout", "talk_silence_timeout",
+        "max_record_seconds",
+        # Barge-in
+        "enable_barge_in", "barge_in_frames", "barge_in_silence",
+        # Debug
+        "debug",
     )
 
     def _reload_config_flags(self):

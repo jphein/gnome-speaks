@@ -783,20 +783,23 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         }
 
-        // Fade out over 500ms
+        // Fade out over 500ms — no onComplete (GC safety)
         this._subtitleOverlay.remove_all_transitions();
         this._subtitleOverlay.ease({
             opacity: 0,
             duration: 500,
             mode: Clutter.AnimationMode.EASE_IN_QUAD,
-            onComplete: () => {
-                if (this._subtitleOverlay && !this._destroyed) {
-                    this._subtitleOverlay.hide();
-                    this._subtitleVisible = false;
-                    this._subtitleText = '';
-                }
-            },
         });
+        let fadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 520, () => {
+            this._cancelTimeout('subtitle-fade-finish');
+            if (this._subtitleOverlay && !this._destroyed) {
+                this._subtitleOverlay.hide();
+                this._subtitleVisible = false;
+                this._subtitleText = '';
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+        this._registerTimeout('subtitle-fade-finish', fadeId);
     }
 
     _scheduleSubtitleFadeout(delayMs = 3000) {
@@ -987,7 +990,10 @@ export default class GnomeSpeaksExtension extends Extension {
                 } else {
                     this._badge.ease({
                         opacity: 0, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                        onComplete: () => { if (!this._destroyed && this._badge) this._badge.hide(); },
+                    });
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 220, () => {
+                        if (!this._destroyed && this._badge) this._badge.hide();
+                        return GLib.SOURCE_REMOVE;
                     });
                 }
             }
@@ -1441,24 +1447,22 @@ export default class GnomeSpeaksExtension extends Extension {
 
         let targetScale = this._pulseUp ? 1.06 : 1.0;
 
+        // No onComplete — GC can invoke Clutter transition callbacks during
+        // sweep, causing "JS callback during garbage collection" and black screen.
+        // Use a GLib timeout instead; GLib sources are not actor-bound.
         this._badge.ease({
             scale_x: targetScale,
             scale_y: targetScale,
             duration: 800,
             mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-            onComplete: () => {
-                if (this._destroyed || !this._pulseActive || !this._badge)
-                    return;
-                this._pulseUp = !this._pulseUp;
-                // Schedule next pulse asynchronously to prevent stack overflow
-                // if ease() completes synchronously (e.g., target === current value)
-                this._pulseNextId = GLib.timeout_add(GLib.PRIORITY_LOW, 16, () => {
-                    this._pulseNextId = null;
-                    if (!this._destroyed)
-                        this._doPulse();
-                    return GLib.SOURCE_REMOVE;
-                });
-            },
+        });
+        this._pulseNextId = GLib.timeout_add(GLib.PRIORITY_LOW, 820, () => {
+            this._pulseNextId = null;
+            if (this._destroyed || !this._pulseActive || !this._badge)
+                return GLib.SOURCE_REMOVE;
+            this._pulseUp = !this._pulseUp;
+            this._doPulse();
+            return GLib.SOURCE_REMOVE;
         });
     }
 
@@ -1761,7 +1765,10 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._menuBadgeToggle.setToggleState(false);
             this._badge.ease({
                 opacity: 0, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                onComplete: () => { if (!this._destroyed && this._badge) this._badge.hide(); },
+            });
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 220, () => {
+                if (!this._destroyed && this._badge) this._badge.hide();
+                return GLib.SOURCE_REMOVE;
             });
             this._destroyContextMenu();
         });

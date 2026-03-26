@@ -1050,7 +1050,12 @@ class GnomeSpeaksService:
                     else:
                         silence_sec = state.SILENCE_TIMEOUT
                     max_silence = int(silence_sec * 1000 / FRAME_MS)
-                    max_no_speech = int(state.NO_SPEECH_TIMEOUT * 1000 / FRAME_MS)
+                    # In loop mode, wait much longer for speech before cycling.
+                    # Default 7s causes ~8 restarts/min of silence, each with WS
+                    # session re-init overhead. 60s keeps the session alive and
+                    # responsive while burning near-zero resources in silence.
+                    no_speech_sec = 60.0 if is_loop else state.NO_SPEECH_TIMEOUT
+                    max_no_speech = int(no_speech_sec * 1000 / FRAME_MS)
                     min_speech = int(state.MIN_SPEECH_DURATION * 1000 / FRAME_MS)
                     max_frames = int(MAX_LISTEN_SECONDS * 1000 / FRAME_MS)
 
@@ -1062,7 +1067,9 @@ class GnomeSpeaksService:
                             _log(f"recorder EOF at frame {total_frames}")
                             break
 
-                        _raw_frames.append(chunk)
+                        # Only buffer frames after speech starts (saves memory in loop idle)
+                        if speech_frames > 0 or not is_loop:
+                            _raw_frames.append(chunk)
 
                         try:
                             ws.send(_make_ws_audio_msg(_req_id, chunk), opcode=websocket.ABNF.OPCODE_BINARY)
@@ -1073,15 +1080,19 @@ class GnomeSpeaksService:
                         energy = rms_energy(chunk)
                         total_frames += 1
 
-                        # Emit audio level for badge visualization (~90ms interval)
-                        if total_frames % 9 == 0:
-                            GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
-
-                        if is_speech_energy(chunk, vad, energy_threshold):
+                        is_speech = is_speech_energy(chunk, vad, energy_threshold)
+                        if is_speech:
                             speech_frames += 1
                             silence_frames = 0
                         else:
                             silence_frames += 1
+
+                        # Emit audio level for badge visualization (~90ms interval).
+                        # In loop idle (no speech yet), throttle to every 27 frames
+                        # (~270ms) to reduce D-Bus traffic while waiting.
+                        emit_interval = 9 if speech_frames > 0 else 27
+                        if total_frames % emit_interval == 0:
+                            GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
 
                         if _end_word_event.is_set():
                             _log(f"STOP: end word '{end_word}' detected. speech={speech_frames}")

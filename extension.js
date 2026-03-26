@@ -799,7 +799,7 @@ export default class GnomeSpeaksExtension extends Extension {
             }
             return GLib.SOURCE_REMOVE;
         });
-        this._registerTimeout('subtitle-fade-finish', fadeId);
+        this._trackTimeout(fadeId, 'subtitle-fade-finish');
     }
 
     _scheduleSubtitleFadeout(delayMs = 3000) {

@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import queue
 import threading
 import time
 import uuid
@@ -241,7 +242,7 @@ def clipboard_read():
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:
-            pass
+            log.debug("Clipboard read timed out: %s", cmd[0])
     return ""
 
 
@@ -258,8 +259,8 @@ def clipboard_write(text):
             return True
         except FileNotFoundError:
             continue
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            log.debug("Clipboard write failed with %s: %s", cmd[0], exc)
     return False
 
 
@@ -290,7 +291,8 @@ def _is_ydotoold_running():
     try:
         result = subprocess.run(["pidof", "ydotoold"], capture_output=True, timeout=2)
         return result.returncode == 0
-    except Exception:
+    except Exception as exc:
+        log.debug("ydotoold check failed: %s", exc)
         return False
 
 
@@ -412,7 +414,8 @@ def _clipboard_paste(text):
     try:
         subprocess.run(["wl-copy", "--", text], timeout=2,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
+    except Exception as exc:
+        log.warning("Clipboard paste failed: %s", exc)
         return False
     time.sleep(0.01)
     if _TYPING_TOOL == "ydotool":
@@ -467,7 +470,7 @@ def selection_read():
         except FileNotFoundError:
             continue
         except subprocess.TimeoutExpired:
-            pass
+            log.debug("Selection read timed out: %s", cmd[0])
     return ""
 
 
@@ -557,6 +560,16 @@ class GnomeSpeaksService:
         self._conversation_history = []
         self._conversation_lock = threading.Lock()
 
+        # Partial transcription throttling (FIX 4)
+        self._last_partial_time = 0
+        self._last_partial_text = ""
+
+        # Config file mtime cache (FIX 8)
+        self._config_mtime = 0
+
+        # Audio detection flag (FIX 12)
+        self._audio_detected = False
+
         # HTTP progress tracking for REST API status endpoint
         self._http_progress = {
             "text": "", "elapsed": 0.0, "estimated_duration": 0.0,
@@ -575,16 +588,23 @@ class GnomeSpeaksService:
     )
 
     def _reload_config_flags(self):
-        """Re-read boolean mode flags from config file so prefs changes take effect."""
+        """Re-read boolean mode flags from config file so prefs changes take effect.
+
+        Skips JSON parse if file mtime is unchanged since last read.
+        """
+        path = os.path.expanduser("~/.config/speech-to-cli/config.json")
         try:
-            path = os.path.expanduser("~/.config/speech-to-cli/config.json")
+            mtime = os.path.getmtime(path)
+            if mtime == self._config_mtime:
+                return
+            self._config_mtime = mtime
             with open(path) as f:
                 disk = json.load(f)
             for key in self._SYNC_FLAGS:
                 if key in disk:
                     CONFIG[key] = disk[key]
-        except Exception:
-            pass  # file missing or malformed — keep current values
+        except Exception as exc:
+            log.debug("Config reload skipped: %s", exc)
 
     def _save_config_flag(self, key, value):
         """Write a single flag back to the config file so prefs stays in sync."""
@@ -654,6 +674,21 @@ class GnomeSpeaksService:
             )
         return False
 
+    def _throttled_partial_transcription(self, text):
+        """Throttle partial transcription D-Bus signals during STT.
+
+        Only emits if text has changed AND at least 150ms elapsed since last emit.
+        Called from worker threads — schedules via GLib.idle_add when emitting.
+        """
+        now = time.monotonic()
+        if text == self._last_partial_text:
+            return
+        if (now - self._last_partial_time) < 0.15:
+            return
+        self._last_partial_text = text
+        self._last_partial_time = now
+        GLib.idle_add(self._emit_partial_transcription, text)
+
     def _emit_subtitle_update(self, text, duration, percent):
         if self._connection is not None:
             self._connection.emit_signal(
@@ -710,9 +745,16 @@ class GnomeSpeaksService:
         If quick=True, skip config reload and audio detection refresh.
         Used for tight loop restarts where config hasn't changed.
         """
+        # Prevent concurrent STT threads from rapid clicks
+        if hasattr(self, '_stt_thread') and self._stt_thread and self._stt_thread.is_alive():
+            log.warning("STT thread already running, ignoring start_listening")
+            return "error: STT thread already running"
+
         if not quick:
             self._reload_config_flags()
-            _refresh_audio_detection()
+            if not self._audio_detected:
+                _refresh_audio_detection()
+                self._audio_detected = True
         if self.current_state != "idle":
             return f"error: busy ({self.current_state})"
 
@@ -855,24 +897,35 @@ class GnomeSpeaksService:
 
         state.register_proc(proc)
 
-        # 2. Get persistent WebSocket (with retry) — reused across all cycles.
+        # 2. Get persistent WebSocket (with exponential backoff retry).
         ws = None
         ws_fresh = False
-        for attempt in range(2):
+        _ws_max_attempts = 4
+        _ws_backoff = 1.0  # seconds, doubles each attempt, caps at 30s
+        for attempt in range(_ws_max_attempts):
             try:
                 ws, ws_fresh = _get_stt_ws()
                 break
             except Exception as exc:
-                _log(f"WS connect attempt {attempt + 1} failed: {exc}")
+                _log(f"WS connect attempt {attempt + 1}/{_ws_max_attempts} failed: {exc}")
                 _invalidate_stt_ws()
-                if attempt == 1:
+                if attempt == _ws_max_attempts - 1:
                     proc.terminate()
-                    proc.wait()
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
                     state.unregister_proc(proc)
                     GLib.idle_add(self._emit_error, f"STT WebSocket failed: {exc}")
                     self._set_state("idle")
                     _schedule_warmup()
                     return
+                # Exponential backoff before next attempt
+                delay = min(_ws_backoff, 30.0)
+                _log(f"WS retry in {delay:.1f}s")
+                time.sleep(delay)
+                _ws_backoff *= 2
 
         # --- Mode flags (stable across cycles) ---
         live_typing = (CONFIG.get("dictation_mode", True)
@@ -909,7 +962,9 @@ class GnomeSpeaksService:
                     break  # fall through to cleanup
             ws_fresh = False  # subsequent cycles always drain
 
-            # 4. Per-cycle shared state
+            # 4. Per-cycle shared state — reset partial throttle for new utterance
+            self._last_partial_text = ""
+            self._last_partial_time = 0
             phrases = []
             partial_holder = [""]
             end_word_event = threading.Event()
@@ -972,8 +1027,8 @@ class GnomeSpeaksService:
                         energy = rms_energy(chunk)
                         total_frames += 1
 
-                        # Emit audio level for badge visualization
-                        if total_frames % 3 == 0:
+                        # Emit audio level for badge visualization (~90ms interval)
+                        if total_frames % 9 == 0:
                             GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
 
                         if is_speech_energy(chunk, vad, energy_threshold):
@@ -1041,7 +1096,7 @@ class GnomeSpeaksService:
                 if mtype == "hypothesis":
                     text = partial_holder[0]
                     if text:
-                        GLib.idle_add(self._emit_partial_transcription, text)
+                        self._throttled_partial_transcription(text)
                         if live_typing:
                             replace_typed_text(typed_partial[0], raw_partial[0])
                             typed_partial[0] = raw_partial[0]
@@ -1054,8 +1109,8 @@ class GnomeSpeaksService:
                         try:
                             ws.settimeout(0.5)
                             ws.recv()  # drain final message
-                        except Exception:
-                            pass  # expected — no more messages
+                        except Exception as exc:
+                            _log(f"WS drain after phrase (expected): {exc}")
                         break
                 elif mtype == "turn_end":
                     _log(f"turn.end received (phrases={len(phrases)})")
@@ -1085,7 +1140,8 @@ class GnomeSpeaksService:
                     try:
                         ws.settimeout(0.5)
                         msg = ws.recv()
-                    except Exception:
+                    except Exception as exc:
+                        _log(f"WS post-sender drain done: {exc}")
                         break
                     mtype = _parse_ws_msg(msg, phrases, partial_holder, end_word_event, end_word, _log,
                                           raw_partial_holder=raw_partial, use_lexical=use_lexical)
@@ -1183,11 +1239,17 @@ class GnomeSpeaksService:
         # Only reached when exiting the cycle loop.
         # ---------------------------------------------------------------
         # Terminate the recorder process (it was kept alive across cycles)
+        # pw-record ignores SIGTERM — escalate to SIGKILL after timeout
         try:
             proc.terminate()
-            proc.wait(timeout=3)
-        except Exception:
-            pass
+            try:
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                log.debug("Recorder ignored SIGTERM, sending SIGKILL")
+                proc.kill()
+                proc.wait(timeout=1.0)
+        except Exception as exc:
+            log.debug("Recorder cleanup error: %s", exc)
         state.unregister_proc(proc)
 
         # If we exited due to conversation_mode, it already set state + scheduled warmup
@@ -1231,7 +1293,9 @@ class GnomeSpeaksService:
 
     def speak(self, text):
         """Synthesize and play text via speech_tts.tts(). Returns True on success."""
-        _refresh_audio_detection()
+        if not self._audio_detected:
+            _refresh_audio_detection()
+            self._audio_detected = True
         if not text or not text.strip():
             return False
 
@@ -1290,6 +1354,19 @@ class GnomeSpeaksService:
         # Final emission at 100%
         if not state._cancel_event.is_set():
             GLib.idle_add(self._emit_subtitle_update, text, estimated_duration, 100)
+
+    def _subtitle_queue_worker(self, subtitle_q):
+        """Single subtitle thread that processes (text, duration) tuples from a queue.
+
+        Eliminates per-sentence thread creation overhead (~5-10ms each).
+        Reads from subtitle_q until a None sentinel is received.
+        """
+        while True:
+            item = subtitle_q.get()
+            if item is None:
+                break
+            text, estimated_duration, stop_event = item
+            self._run_subtitle_progress(text, estimated_duration, stop_event)
 
     def _speak_worker(self, text):
         """Background thread: TTS using speech_tts.tts()."""
@@ -1653,8 +1730,8 @@ class GnomeSpeaksService:
             if result.returncode == 0:
                 m = self._GDBUS_EVAL_RE.search(result.stdout)
                 return m.group(1) if m and m.group(1) else None
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to get focused app: %s", exc)
         return None
 
     def _get_clipboard_text(self):
@@ -1813,6 +1890,13 @@ class GnomeSpeaksService:
             first_sentence = True
             spoke_anything = False
 
+            # Single subtitle thread for the entire conversation (Fix 7)
+            subtitle_q = queue.Queue()
+            subtitle_thread = threading.Thread(
+                target=self._subtitle_queue_worker,
+                args=(subtitle_q,), daemon=True)
+            subtitle_thread.start()
+
             for token in token_iter:
                 if self._stop_event.is_set():
                     log.info("Streaming aborted — stop event set")
@@ -1876,14 +1960,10 @@ class GnomeSpeaksService:
                     _sf = 22.0 if self._voice_quality == "fast" else 15.0
                     _sd = max(1.0, len(sentence) / _sf)
                     _ss = threading.Event()
-                    _st = threading.Thread(
-                        target=self._run_subtitle_progress,
-                        args=(sentence, _sd, _ss), daemon=True)
-                    _st.start()
+                    subtitle_q.put((sentence, _sd, _ss))
                     speech_tts.tts(sentence, quality=self._voice_quality,
                                    audio_level_cb=self._tts_level_cb)
                     _ss.set()
-                    _st.join(timeout=1.0)
 
                     if self._stop_event.is_set():
                         break
@@ -1903,14 +1983,14 @@ class GnomeSpeaksService:
                 _sf = 22.0 if self._voice_quality == "fast" else 15.0
                 _sd = max(1.0, len(remainder) / _sf)
                 _ss = threading.Event()
-                _st = threading.Thread(
-                    target=self._run_subtitle_progress,
-                    args=(remainder, _sd, _ss), daemon=True)
-                _st.start()
+                subtitle_q.put((remainder, _sd, _ss))
                 speech_tts.tts(remainder, quality=self._voice_quality,
                                audio_level_cb=self._tts_level_cb)
                 _ss.set()
-                _st.join(timeout=1.0)
+
+            # Stop subtitle queue worker and wait for it to finish
+            subtitle_q.put(None)
+            subtitle_thread.join(timeout=2.0)
 
             # --- Post-stream: history, type tags, state transitions ---
 
@@ -1919,6 +1999,8 @@ class GnomeSpeaksService:
                 with self._conversation_lock:
                     self._conversation_history.append({"role": "user", "content": user_text})
                     self._conversation_history.append({"role": "assistant", "content": reply})
+                    if len(self._conversation_history) > 100:
+                        self._conversation_history = self._conversation_history[-100:]
 
                 # Handle <type> tags from accumulated reply (terminal mode)
                 type_text, _speak_text = self._parse_type_tags(reply)
@@ -1969,7 +2051,8 @@ class GnomeSpeaksService:
             with open(path) as f:
                 import json as _json
                 return _json.load(f)
-        except Exception:
+        except Exception as exc:
+            log.debug("CCA config load failed: %s", exc)
             return {}
 
     # -- Stop --------------------------------------------------------------
@@ -2464,19 +2547,20 @@ def main():
                 _get_stt_ws()
                 log.info("STT WebSocket pre-warmed")
         except Exception as exc:
-            log.debug("STT WebSocket pre-warm failed (will retry on first use): %s", exc)
+            log.warning("STT WebSocket pre-warm failed (will retry on first use): %s", exc)
         try:
             session = state.get_http_session()
             tts_region = CONFIG.get("tts_region") or CONFIG.get("region")
             if tts_region:
-                session.head(f"https://{tts_region}.tts.speech.microsoft.com", timeout=5)
+                session.head(f"https://{tts_region}.tts.speech.microsoft.com", timeout=3)
                 log.info("TTS HTTP session pre-warmed")
         except Exception as exc:
-            log.debug("TTS HTTP pre-warm failed (will retry on first use): %s", exc)
+            log.warning("TTS HTTP pre-warm failed (will retry on first use): %s", exc)
     threading.Thread(target=_prewarm_connections, daemon=True).start()
 
     # Create service and handler
     service = GnomeSpeaksService()
+    service._audio_detected = True  # startup detection already ran above
     handler = DBusHandler(service)
 
     # Set up main loop

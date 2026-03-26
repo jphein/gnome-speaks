@@ -182,6 +182,13 @@ export default class GnomeSpeaksExtension extends Extension {
         this._audioLevel = 0;
         this._lastAudioLevelTime = 0;
         this._lastPartialTime = 0;
+        this._lastPartialText = null;
+        this._lastRenderedPartial = null;
+        this._pendingPartialText = null;
+        this._partialDebounceId = null;
+        this._lastSubtitleUpdateTime = 0;
+        this._pendingSubtitleReveal = null;
+        this._subtitleDebounceId = null;
         this._subtitleText = '';
         this._subtitleVisible = false;
         this._settings = this.getSettings();
@@ -239,6 +246,8 @@ export default class GnomeSpeaksExtension extends Extension {
         }
 
         this._endDrag();
+        this._partialDebounceId = null;
+        this._subtitleDebounceId = null;
         this._cancelAllTimeouts();
         this._stopPulse();
         this._disconnectNotificationReader();
@@ -1282,11 +1291,18 @@ export default class GnomeSpeaksExtension extends Extension {
         }
 
         // Pills: hidden in idle, shown when active
-        this._showPills(newState !== States.IDLE);
-        this._updateQualityPill();
-        this._updateModePill();
-        this._updateContinuousPill();
-        this._updateTerminalPill();
+        let showPills = newState !== States.IDLE;
+        let wasShowingPills = oldState && oldState !== States.IDLE;
+        if (showPills !== wasShowingPills) {
+            this._showPills(showPills);
+            // Only refresh pill content when transitioning visibility
+            if (showPills) {
+                this._updateQualityPill();
+                this._updateModePill();
+                this._updateContinuousPill();
+                this._updateTerminalPill();
+            }
+        }
 
         // Update panel icon and menu
         this._updatePanelIcon(newState);
@@ -1490,15 +1506,39 @@ export default class GnomeSpeaksExtension extends Extension {
         if (this._state !== States.LISTENING && this._state !== States.SPEAKING)
             return;
 
-        // Debounce: skip if last update was < 50ms ago
-        let now = GLib.get_monotonic_time();
-        if (this._lastPartialTime && (now - this._lastPartialTime) < 50000)
+        // Skip if text hasn't changed
+        if (text === this._lastPartialText)
             return;
-        this._lastPartialTime = now;
+        this._lastPartialText = text;
 
-        // Show in the subtitle overlay (full text, no truncation)
+        // Coalescing debounce: buffer the latest text and render at most
+        // every 300ms (~3 updates/sec). If a timeout is already pending,
+        // just update the buffered text — the pending timeout will pick it up.
+        this._pendingPartialText = text;
+
+        if (this._partialDebounceId)
+            return; // timeout already scheduled, it will use _pendingPartialText
+
+        // First update in this window — render immediately
         this._showSubtitle(text, true);
+        this._lastPartialTime = GLib.get_monotonic_time();
 
+        // Schedule the gate: after 300ms, flush the latest buffered text
+        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            this._partialDebounceId = null;
+            this._removeTimeout('partial-debounce');
+            if (this._destroyed)
+                return GLib.SOURCE_REMOVE;
+            // If newer text arrived while we were waiting, render it now
+            if (this._pendingPartialText && this._pendingPartialText !== this._lastRenderedPartial) {
+                this._showSubtitle(this._pendingPartialText, true);
+                this._lastRenderedPartial = this._pendingPartialText;
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+        this._partialDebounceId = timeoutId;
+        this._lastRenderedPartial = text;
+        this._trackTimeout(timeoutId, 'partial-debounce');
     }
 
     _onSubtitleUpdate(text, duration, percent) {
@@ -1507,21 +1547,46 @@ export default class GnomeSpeaksExtension extends Extension {
         if (this._state !== States.SPEAKING)
             return;
 
+        // When reveal reaches 100%, always render immediately (final state)
+        if (percent >= 100) {
+            this._cancelTimeout('subtitle-debounce');
+            this._showSubtitle(text, false);
+            this._scheduleSubtitleFadeout(2000);
+            return;
+        }
+
         // Progressive reveal: show text up to the current estimated position
         let charPos = Math.floor((percent / 100.0) * text.length);
         let revealed = text.substring(0, charPos);
 
-        if (revealed.length > 0) {
-            // Show full revealed text in the subtitle overlay
-            this._showSubtitle(revealed, true);
+        if (revealed.length === 0)
+            return;
 
+        // Throttle progressive reveals to ~3/sec (330ms)
+        let now = GLib.get_monotonic_time();
+        if (this._lastSubtitleUpdateTime && (now - this._lastSubtitleUpdateTime) < 330000) {
+            // Buffer the latest reveal text for the next scheduled flush
+            this._pendingSubtitleReveal = revealed;
+            if (!this._subtitleDebounceId) {
+                let remaining = 330 - Math.floor((now - this._lastSubtitleUpdateTime) / 1000);
+                let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(remaining, 16), () => {
+                    this._subtitleDebounceId = null;
+                    this._removeTimeout('subtitle-debounce');
+                    if (this._destroyed || !this._pendingSubtitleReveal)
+                        return GLib.SOURCE_REMOVE;
+                    this._showSubtitle(this._pendingSubtitleReveal, true);
+                    this._lastSubtitleUpdateTime = GLib.get_monotonic_time();
+                    this._pendingSubtitleReveal = null;
+                    return GLib.SOURCE_REMOVE;
+                });
+                this._subtitleDebounceId = timeoutId;
+                this._trackTimeout(timeoutId, 'subtitle-debounce');
+            }
+            return;
         }
 
-        // When reveal reaches 100%, schedule fade-out
-        if (percent >= 100) {
-            this._showSubtitle(text, false);
-            this._scheduleSubtitleFadeout(2000);
-        }
+        this._lastSubtitleUpdateTime = now;
+        this._showSubtitle(revealed, true);
     }
 
     _showTranscription(text) {

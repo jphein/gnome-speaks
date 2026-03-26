@@ -40,7 +40,7 @@
 
 .gnome-speaks-badge:hover {
     background-color: rgba(50, 50, 55, 0.82);
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
     border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
@@ -92,7 +92,7 @@
 
 .gnome-speaks-listening:hover {
     background-color: rgba(40, 120, 240, 0.92);
-    box-shadow: 0 0 28px rgba(30, 130, 255, 0.6);
+    box-shadow: 0 0 20px rgba(30, 130, 255, 0.6);
 }
 
 /* ============================================================
@@ -142,7 +142,7 @@
 
 .gnome-speaks-speaking:hover {
     background-color: rgba(150, 70, 230, 0.92);
-    box-shadow: 0 0 28px rgba(160, 80, 255, 0.6);
+    box-shadow: 0 0 20px rgba(160, 80, 255, 0.6);
 }
 
 /* ============================================================

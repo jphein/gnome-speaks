@@ -98,6 +98,7 @@ Synchronous fallback: cloud-chat-assistant, Bedrock
 - **Half-duplex drain**: On speakers, 0.5s delay after TTS before opening mic to prevent echo pickup.
 - **Config dual-write**: Mode flags exist in both the Python `CONFIG` dict (runtime) and `~/.config/speech-to-cli/config.json` (disk). `_reload_config_flags()` and `_save_config_flag()` keep them in sync. Be careful not to create drift.
 - **Schema compilation**: After editing the `.gschema.xml`, must run `glib-compile-schemas` on the install directory.
+- **Disposed notification sources**: During shell init/restart, `MessageTray` `source-added` can fire with already-disposed `FdoNotificationDaemonSource` objects. Any signal connection on them crashes the shell. Always wrap `source.connect()` in try-catch and listen for `source-removed` to drop references before GC disposes them.
 - **Azure content filter**: Avoid `[SYSTEM:]` prefix in system prompts -- Azure GPT content filter blocks it.
 
 ## Testing

@@ -318,13 +318,31 @@ export default class GnomeSpeaksExtension extends Extension {
     // -- Notification reader -----------------------------------------------
 
     _connectNotificationReader() {
+        this._notifSignals = [];
+
         this._notifSourceAddedId = Main.messageTray.connect('source-added', (tray, source) => {
-            let notifAddedId = source.connect('notification-added', (src, notification) => {
-                this._onNotification(notification);
+            if (this._destroyed) return;
+            try {
+                let notifAddedId = source.connect('notification-added', (src, notification) => {
+                    if (this._destroyed) return;
+                    this._onNotification(notification);
+                });
+                this._notifSignals.push({obj: source, id: notifAddedId});
+            } catch (e) {
+                // Source may already be disposed during shell init/restart
+            }
+        });
+
+        // Proactively drop references when sources are removed, before GC disposes them
+        this._notifSourceRemovedId = Main.messageTray.connect('source-removed', (tray, source) => {
+            if (!this._notifSignals) return;
+            this._notifSignals = this._notifSignals.filter(sig => {
+                if (sig.obj === source) {
+                    try { source.disconnect(sig.id); } catch (e) { /* ok */ }
+                    return false;
+                }
+                return true;
             });
-            if (!this._notifSignals)
-                this._notifSignals = [];
-            this._notifSignals.push({obj: source, id: notifAddedId});
         });
     }
 
@@ -333,9 +351,13 @@ export default class GnomeSpeaksExtension extends Extension {
             Main.messageTray.disconnect(this._notifSourceAddedId);
             this._notifSourceAddedId = null;
         }
+        if (this._notifSourceRemovedId) {
+            Main.messageTray.disconnect(this._notifSourceRemovedId);
+            this._notifSourceRemovedId = null;
+        }
         if (this._notifSignals) {
             for (let sig of this._notifSignals) {
-                try { sig.obj.disconnect(sig.id); } catch (e) { /* ok */ }
+                try { sig.obj.disconnect(sig.id); } catch (e) { /* disposed, ok */ }
             }
             this._notifSignals = null;
         }

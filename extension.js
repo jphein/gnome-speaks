@@ -154,6 +154,11 @@ const STATE_CONFIG = {
     },
 };
 
+// Word-reveal markup colors (Pango span attributes)
+const WORD_COLOR_SETTLED = '#e8e0f0';      // soft cream — matches subtitle text
+const WORD_COLOR_NEW = '#88ccff';          // bright blue — new words
+const WORD_COLOR_CORRECTED = '#ffcc66';    // warm amber — corrected words
+
 export default class GnomeSpeaksExtension extends Extension {
     enable() {
         try {
@@ -191,6 +196,9 @@ export default class GnomeSpeaksExtension extends Extension {
         this._subtitleDebounceId = null;
         this._subtitleText = '';
         this._subtitleVisible = false;
+        this._previousWords = [];
+        this._wordHighlights = [];
+        this._pendingPartialMarkup = null;
         this._settings = this.getSettings();
 
         // Restore persisted badge position
@@ -488,6 +496,8 @@ export default class GnomeSpeaksExtension extends Extension {
                     this._dragBadgeStartY + dy
                 );
                 this._customPosition = {x: actor.x, y: actor.y};
+                this._positionGlowRing();
+                this._positionSubtitleOverlay();
                 if (this._settings) {
                     this._settings.set_int('badge-position-x', Math.round(actor.x));
                     this._settings.set_int('badge-position-y', Math.round(actor.y));
@@ -509,6 +519,16 @@ export default class GnomeSpeaksExtension extends Extension {
             return Clutter.EVENT_STOP;
         });
         this._signals.push({obj: this._badge, id: releaseId});
+
+        // Glow ring — audio-reactive halo behind badge (on uiGroup so it renders behind)
+        this._glowRing = new St.Bin({
+            style_class: 'gnome-speaks-glow',
+            reactive: false,
+            can_focus: false,
+            opacity: 0,
+        });
+        this._glowRing.set_pivot_point(0.5, 0.5);
+        Main.uiGroup.add_child(this._glowRing);
 
         Main.layoutManager.addTopChrome(this._badge, {
             affectsInputRegion: true,
@@ -704,23 +724,39 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _positionSubtitleOverlay() {
-        if (!this._subtitleOverlay)
+        if (!this._subtitleOverlay || !this._badge)
             return;
 
+        let badge = this._badge;
         let monitor = Main.layoutManager.primaryMonitor;
         if (!monitor)
             return;
 
-        // Position centered horizontally, 100px from bottom
-        let overlayWidth = Math.min(800, monitor.width - 80);
-        let x = monitor.x + Math.round((monitor.width - overlayWidth) / 2);
-        let y = monitor.y + monitor.height - 100 - 60; // 100px from bottom, ~60px for overlay height
+        let overlayWidth = Math.min(600, monitor.width - 80);
+        this._subtitleOverlay.set_style(`max-width: ${overlayWidth}px; min-width: 200px;`);
 
-        this._subtitleOverlay.set_position(x, y);
-        this._subtitleOverlay.set_width(overlayWidth);
+        // Show above or below badge depending on screen position
+        let badgeCenterY = badge.y + badge.height / 2;
+        let screenMidY = monitor.y + monitor.height / 2;
+        let showAbove = badgeCenterY > screenMidY;
+
+        // Horizontal: center on badge, clamp to screen edges
+        let overlayX = badge.x + badge.width / 2 - overlayWidth / 2;
+        overlayX = Math.max(monitor.x + 20, Math.min(overlayX, monitor.x + monitor.width - overlayWidth - 20));
+
+        // Vertical: 12px gap above or below badge
+        let overlayY;
+        if (showAbove) {
+            let estHeight = this._subtitleOverlay.height || 60;
+            overlayY = badge.y - estHeight - 12;
+        } else {
+            overlayY = badge.y + badge.height + 12;
+        }
+
+        this._subtitleOverlay.set_position(overlayX, overlayY);
     }
 
-    _showSubtitle(text, isPartial = false) {
+    _showSubtitle(text, isPartial = false, useMarkup = false) {
         if (this._destroyed)
             return;
 
@@ -731,28 +767,30 @@ export default class GnomeSpeaksExtension extends Extension {
         if (!this._subtitleOverlay || !this._subtitleLabel)
             return;
 
-        // Smart text display: sliding window for very long text
-        let displayText = text;
-        if (displayText.length > 300) {
-            // Show last ~200 chars, word-aligned
-            let start = displayText.length - 200;
-            let spaceIdx = displayText.indexOf(' ', start);
-            if (spaceIdx > 0 && spaceIdx < start + 30)
-                start = spaceIdx + 1;
-            displayText = `...${displayText.substring(start)}`;
-        }
+        if (useMarkup) {
+            // Pango markup mode — text is pre-formatted with word highlights
+            this._subtitleLabel.clutter_text.set_markup(text);
+            this._subtitleText = text;
+        } else {
+            // Plain text mode — sliding window for very long text
+            let displayText = text;
+            if (displayText.length > 300) {
+                let start = displayText.length - 200;
+                let spaceIdx = displayText.indexOf(' ', start);
+                if (spaceIdx > 0 && spaceIdx < start + 30)
+                    start = spaceIdx + 1;
+                displayText = `...${displayText.substring(start)}`;
+            }
 
-        this._subtitleText = displayText;
-        this._subtitleLabel.text = displayText;
+            this._subtitleText = displayText;
+            this._subtitleLabel.text = displayText;
+        }
 
         // Apply partial/final style
         this._subtitleOverlay.remove_style_class_name('gnome-speaks-subtitle-partial');
         this._subtitleOverlay.remove_style_class_name('gnome-speaks-subtitle-final');
         this._subtitleOverlay.add_style_class_name(
             isPartial ? 'gnome-speaks-subtitle-partial' : 'gnome-speaks-subtitle-final');
-
-        // Reposition in case the monitor changed
-        this._positionSubtitleOverlay();
 
         // Cancel any pending fade-out
         this._cancelTimeout('subtitle-fadeout');
@@ -768,6 +806,13 @@ export default class GnomeSpeaksExtension extends Extension {
             });
             this._subtitleVisible = true;
         }
+
+        // Reposition after text change (size may have changed)
+        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            if (this._destroyed) return GLib.SOURCE_REMOVE;
+            this._positionSubtitleOverlay();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _hideSubtitle(immediate = false) {
@@ -870,6 +915,13 @@ export default class GnomeSpeaksExtension extends Extension {
         this._signals = [];
 
         this._destroyContextMenu();
+
+        if (this._glowRing) {
+            this._glowRing.remove_all_transitions();
+            Main.uiGroup.remove_child(this._glowRing);
+            this._glowRing.destroy();
+            this._glowRing = null;
+        }
 
         if (this._badge) {
             this._badge.remove_all_transitions();
@@ -1075,6 +1127,8 @@ export default class GnomeSpeaksExtension extends Extension {
                     && cy < monitor.y + monitor.height - 20;
                 if (inBounds) {
                     this._badge.set_position(cx, cy);
+                    this._positionGlowRing();
+                    this._positionSubtitleOverlay();
                     return;
                 }
                 // Out of bounds — fall through to default positioning
@@ -1085,6 +1139,8 @@ export default class GnomeSpeaksExtension extends Extension {
                 }
             } else {
                 this._badge.set_position(this._customPosition.x, this._customPosition.y);
+                this._positionGlowRing();
+                this._positionSubtitleOverlay();
                 return;
             }
         }
@@ -1110,9 +1166,25 @@ export default class GnomeSpeaksExtension extends Extension {
             let y = monitor.y + monitor.height - 80;
 
             this._badge.set_position(x, y);
+            this._positionGlowRing();
+            this._positionSubtitleOverlay();
             return GLib.SOURCE_REMOVE;
         });
         this._trackTimeout(timeoutId);
+    }
+
+    _positionGlowRing() {
+        if (!this._glowRing || !this._badge) return;
+        let badge = this._badge;
+        // Size the glow to 2.5x badge size for visible halo
+        let size = Math.max(badge.width, badge.height) * 2.5;
+        if (size <= 0) size = 120;
+        this._glowRing.set_size(size, size);
+        // Center on badge
+        this._glowRing.set_position(
+            badge.x + badge.width / 2 - size / 2,
+            badge.y + badge.height / 2 - size / 2
+        );
     }
 
     _connectLayoutSignals() {
@@ -1320,6 +1392,19 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badge.remove_style_class_name('gnome-speaks-error');
         this._badge.add_style_class_name(config.styleClass);
 
+        // Update glow ring color for state
+        if (this._glowRing) {
+            this._glowRing.remove_style_class_name('gnome-speaks-glow-listening');
+            this._glowRing.remove_style_class_name('gnome-speaks-glow-speaking');
+            this._glowRing.remove_style_class_name('gnome-speaks-glow-processing');
+            let glowClass = {
+                [States.LISTENING]: 'gnome-speaks-glow-listening',
+                [States.SPEAKING]: 'gnome-speaks-glow-speaking',
+                [States.PROCESSING]: 'gnome-speaks-glow-processing',
+            }[newState];
+            if (glowClass) this._glowRing.add_style_class_name(glowClass);
+        }
+
         // Update icon
         if (this._icon) {
             this._icon.icon_name = config.iconName;
@@ -1377,6 +1462,21 @@ export default class GnomeSpeaksExtension extends Extension {
         if (newState !== States.LISTENING)
             this._audioLevel = 0;
 
+        // Reset word tracking for new utterance
+        if (newState === States.IDLE || newState === States.LISTENING) {
+            this._previousWords = [];
+            this._wordHighlights = [];
+            this._cancelTimeout('word-highlight-fade');
+        }
+
+        // Fade glow ring when leaving active states
+        if (newState === States.IDLE && this._glowRing) {
+            this._glowRing.ease({
+                opacity: 0, scale_x: 1.0, scale_y: 1.0,
+                duration: 400, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+        }
+
         // Handle animations
         if (newState === States.LISTENING || newState === States.SPEAKING) {
             this._startPulse();
@@ -1397,16 +1497,25 @@ export default class GnomeSpeaksExtension extends Extension {
             this._cancelTimeout('subtitle-fadeout');
         }
 
-        // Reposition badge if going to/from idle (size changes)
+        // Reposition badge + glow + subtitle if going to/from idle (size changes)
         if ((oldState === States.IDLE && newState !== States.IDLE) ||
             (oldState !== States.IDLE && newState === States.IDLE)) {
             if (!this._customPosition) {
                 let delay = (newState === States.IDLE) ? 16 : 50;
                 let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+                    if (this._destroyed) return GLib.SOURCE_REMOVE;
                     this._positionBadge();
                     return GLib.SOURCE_REMOVE;
                 });
                 this._trackTimeout(timeoutId);
+            } else {
+                // Custom position — still need to reposition glow and subtitle
+                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                    if (this._destroyed) return GLib.SOURCE_REMOVE;
+                    this._positionGlowRing();
+                    this._positionSubtitleOverlay();
+                    return GLib.SOURCE_REMOVE;
+                });
             }
         }
     }
@@ -1548,45 +1657,96 @@ export default class GnomeSpeaksExtension extends Extension {
             this._proxy[remoteName](callback);
     }
 
+    _buildWordMarkup(newText) {
+        let newWords = newText.trim().split(/\s+/).filter(w => w.length > 0);
+        let prevWords = this._previousWords || [];
+        let now = GLib.get_monotonic_time();
+
+        // Find common prefix length
+        let commonLen = 0;
+        while (commonLen < prevWords.length && commonLen < newWords.length
+               && prevWords[commonLen] === newWords[commonLen]) {
+            commonLen++;
+        }
+
+        let markupParts = [];
+        for (let i = 0; i < newWords.length; i++) {
+            let word = GLib.markup_escape_text(newWords[i], -1);
+            if (i < commonLen) {
+                // Settled word — check for fading highlight
+                let highlight = this._wordHighlights.find(h => h.index === i);
+                if (highlight && (now - highlight.time) < 600000) {
+                    let color = highlight.type === 'new' ? WORD_COLOR_NEW : WORD_COLOR_CORRECTED;
+                    markupParts.push(`<span foreground="${color}" font_weight="bold">${word}</span>`);
+                } else {
+                    markupParts.push(`<span foreground="${WORD_COLOR_SETTLED}">${word}</span>`);
+                }
+            } else if (i >= prevWords.length) {
+                // Brand new word (appended)
+                markupParts.push(`<span foreground="${WORD_COLOR_NEW}" font_weight="bold">${word}</span>`);
+                this._wordHighlights.push({index: i, type: 'new', time: now});
+            } else {
+                // Corrected word (different from previous at this position)
+                markupParts.push(`<span foreground="${WORD_COLOR_CORRECTED}" font_weight="bold">${word}</span>`);
+                this._wordHighlights.push({index: i, type: 'corrected', time: now});
+            }
+        }
+
+        // Clean up old highlights
+        this._wordHighlights = this._wordHighlights.filter(h => (now - h.time) < 600000);
+
+        this._previousWords = newWords;
+        return markupParts.join(' ');
+    }
+
     _showPartialTranscription(text) {
         if (this._destroyed)
             return;
         if (this._state !== States.LISTENING && this._state !== States.SPEAKING)
             return;
 
-        // Skip if text hasn't changed
         if (text === this._lastPartialText)
             return;
         this._lastPartialText = text;
 
-        // Coalescing debounce: buffer the latest text and render at most
-        // every 300ms (~3 updates/sec). If a timeout is already pending,
-        // just update the buffered text — the pending timeout will pick it up.
-        this._pendingPartialText = text;
+        // Build word-level markup (new words highlighted)
+        let markup = this._buildWordMarkup(text);
+        this._pendingPartialMarkup = markup;
 
         if (this._partialDebounceId)
-            return; // timeout already scheduled, it will use _pendingPartialText
+            return;
 
-        // First update in this window — render immediately
-        this._showSubtitle(text, true);
+        // First update — render immediately
+        this._showSubtitle(markup, true, true);
         this._lastPartialTime = GLib.get_monotonic_time();
 
-        // Schedule the gate: after 300ms, flush the latest buffered text
-        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+        // Schedule gate for coalescing (200ms for snappier word-by-word feel)
+        let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
             this._partialDebounceId = null;
             this._removeTimeout('partial-debounce');
             if (this._destroyed)
                 return GLib.SOURCE_REMOVE;
-            // If newer text arrived while we were waiting, render it now
-            if (this._pendingPartialText && this._pendingPartialText !== this._lastRenderedPartial) {
-                this._showSubtitle(this._pendingPartialText, true);
-                this._lastRenderedPartial = this._pendingPartialText;
+            if (this._pendingPartialMarkup) {
+                let freshMarkup = this._buildWordMarkup(this._lastPartialText);
+                this._showSubtitle(freshMarkup, true, true);
             }
             return GLib.SOURCE_REMOVE;
         });
         this._partialDebounceId = timeoutId;
-        this._lastRenderedPartial = text;
         this._trackTimeout(timeoutId, 'partial-debounce');
+
+        // Schedule highlight fade refresh after 650ms
+        this._cancelTimeout('word-highlight-fade');
+        let fadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 650, () => {
+            this._removeTimeout('word-highlight-fade');
+            if (this._destroyed) return GLib.SOURCE_REMOVE;
+            if (this._lastPartialText && this._state === States.LISTENING) {
+                let freshMarkup = this._buildWordMarkup(this._lastPartialText);
+                this._showSubtitle(freshMarkup, true, true);
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+        this._trackTimeout(fadeId, 'word-highlight-fade');
     }
 
     _onSubtitleUpdate(text, duration, percent) {
@@ -1641,12 +1801,16 @@ export default class GnomeSpeaksExtension extends Extension {
         if (this._destroyed)
             return;
 
+        // Reset word tracking — partial phase is done
+        this._previousWords = [];
+        this._wordHighlights = [];
+        this._cancelTimeout('word-highlight-fade');
+
         // Show in the subtitle overlay — final, non-italic style
         this._showSubtitle(text, false);
 
         // Schedule fade-out after 3 seconds
         this._scheduleSubtitleFadeout(3000);
-
     }
 
     _showError(message) {
@@ -1694,21 +1858,36 @@ export default class GnomeSpeaksExtension extends Extension {
             this._badge.remove_all_transitions();
         }
 
-        // Set scale directly (no ease) to avoid GL errors on NVIDIA
-        // proprietary drivers from concurrent ease() calls.
-        let baseScale = 1.0;
-        let levelBoost = Math.min(level, 1.0) * 0.12;
-        let targetScale = baseScale + levelBoost;
-        this._badge.set_scale(targetScale, targetScale);
+        let clampedLevel = Math.min(level, 1.0);
 
-        // Resume pulse after 300ms of silence
+        // Badge scale: 1.0 to 1.15 (more dramatic than before)
+        let scale = 1.0 + clampedLevel * 0.15;
+        this._badge.set_scale(scale, scale);
+
+        // Glow ring: opacity 0→220, scale 1.0→1.4
+        if (this._glowRing) {
+            this._glowRing.opacity = Math.floor(clampedLevel * 220);
+            let glowScale = 1.0 + clampedLevel * 0.4;
+            this._glowRing.set_scale(glowScale, glowScale);
+        }
+
+        // Resume pulse + fade glow after 300ms of silence
         this._cancelTimeout('audio-pulse-resume');
         let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
             this._removeTimeout('audio-pulse-resume');
-            if (!this._destroyed && this._badge &&
-                (this._state === States.LISTENING || this._state === States.SPEAKING)) {
-                this._startPulse();
+            if (this._destroyed || !this._badge) return GLib.SOURCE_REMOVE;
+            // Fade glow out smoothly
+            if (this._glowRing) {
+                this._glowRing.ease({
+                    opacity: 0,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    duration: 600,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                });
             }
+            if (this._state === States.LISTENING || this._state === States.SPEAKING)
+                this._startPulse();
             return GLib.SOURCE_REMOVE;
         });
         this._trackTimeout(timeoutId, 'audio-pulse-resume');

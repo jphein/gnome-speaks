@@ -56,6 +56,19 @@ sys.path.insert(0, _SPEECH_ENGINE)
 
 _CCA_PATH = os.environ.get("CLOUD_CHAT_PATH", os.path.expanduser("~/Projects/cloud-chat-assistant"))
 
+# Import unified LLM streaming library from cloud-chat-assistant
+if os.path.isdir(_CCA_PATH):
+    if _CCA_PATH not in sys.path:
+        sys.path.insert(0, _CCA_PATH)
+    try:
+        from llm_stream import stream_chat, LLMStreamError  # noqa: E402
+    except ImportError:
+        stream_chat = None  # noqa: E402
+        LLMStreamError = Exception  # noqa: E402
+else:
+    stream_chat = None
+    LLMStreamError = Exception
+
 import state  # noqa: E402
 from state import CONFIG, HAS_VAD, HAS_WS, HAS_WHISPER, FRAME_BYTES, FRAME_MS, SAMPLE_RATE  # noqa: E402
 from audio import (  # noqa: E402
@@ -96,105 +109,6 @@ log = logging.getLogger("gnome-speaks")
 BUS_NAME = "org.gnome.Speaks"
 OBJECT_PATH = "/org/gnome/Speaks"
 INTERFACE_NAME = "org.gnome.Speaks"
-
-# ---------------------------------------------------------------------------
-# Model name mapping: canonical ID → provider-specific API string
-# ---------------------------------------------------------------------------
-# The prefs UI stores canonical IDs (e.g. "claude-opus-4.6").  Each provider
-# needs a different string for the same model.  _resolve_model() looks up the
-# canonical ID here and returns the provider-specific string, falling back to
-# the canonical ID if no mapping exists (custom / already-correct values).
-
-MODEL_MAP = {
-    # ── Anthropic Claude ──────────────────────────────────────────────
-    "claude-opus-4.6": {
-        "anthropic":    "claude-opus-4-6",
-        "digitalocean": "anthropic-claude-opus-4.6",
-        "bedrock":      "claude-opus-4.6",
-        "openai":       "claude-opus-4.6",
-        "puter":        "claude-opus-4-6",
-    },
-    "claude-sonnet-4.6": {
-        "anthropic":    "claude-sonnet-4-6",
-        "digitalocean": "anthropic-claude-4.6-sonnet",
-        "bedrock":      "claude-sonnet-4.6",
-        "puter":        "claude-sonnet-4-6",
-    },
-    "claude-haiku-4.5": {
-        "anthropic":    "claude-haiku-4-5-20251001",
-        "digitalocean": "anthropic-claude-haiku-4.5",
-        "bedrock":      "claude-haiku-4.5",
-        "puter":        "claude-haiku-4-5-20251001",
-    },
-    "claude-opus-4.5": {
-        "anthropic":    "claude-opus-4-5-20251101",
-        "digitalocean": "anthropic-claude-opus-4.5",
-        "bedrock":      "claude-opus-4.5",
-        "puter":        "claude-opus-4-5-20251101",
-    },
-    "claude-sonnet-4.5": {
-        "anthropic":    "claude-sonnet-4-5-20250929",
-        "digitalocean": "anthropic-claude-4.5-sonnet",
-        "bedrock":      "claude-sonnet-4.5",
-        "puter":        "claude-sonnet-4-5-20250929",
-    },
-    # ── OpenAI ────────────────────────────────────────────────────────
-    "gpt-4o": {
-        "openai":       "gpt-4o",
-        "digitalocean": "openai-gpt-4o",
-        "azure":        "gpt-4o",
-        "puter":        "gpt-4o",
-    },
-    "gpt-4o-mini": {
-        "openai":       "gpt-4o-mini",
-        "digitalocean": "openai-gpt-4o-mini",
-        "azure":        "gpt-4o-mini",
-        "puter":        "gpt-4o-mini",
-    },
-    "o4-mini": {
-        "openai":       "o4-mini",
-        "digitalocean": "openai-o3-mini",
-        "puter":        "o4-mini",
-    },
-    "gpt-5.3": {
-        "openai":       "gpt-5.3-chat",
-        "digitalocean": "openai-gpt-5.3-codex",
-        "puter":        "gpt-5.2-chat-latest",
-    },
-    # ── Meta Llama ────────────────────────────────────────────────────
-    "llama-3.3-70b": {
-        "digitalocean": "llama3.3-70b-instruct",
-        "azure":        "Llama-3.3-70B-Instruct",
-        "bedrock":      "llama4-scout-17b",
-        "puter":        "openrouter:meta-llama/llama-3.3-70b-instruct",
-    },
-    # ── Other ─────────────────────────────────────────────────────────
-    "deepseek-r1": {
-        "digitalocean": "deepseek-r1-distill-llama-70b",
-        "azure":        "DeepSeek-R1",
-        "puter":        "deepseek-reasoner",
-    },
-    "grok-3": {
-        "azure":        "grok-3",
-        "puter":        "grok-3",
-    },
-    "gemini-2.5-flash": {
-        "google":       "gemini-2.5-flash",
-        "puter":        "gemini-2.5-flash",
-    },
-    "gemini-2.5-pro": {
-        "google":       "gemini-2.5-pro",
-        "puter":        "gemini-2.5-pro",
-    },
-}
-
-
-def _resolve_model(canonical, provider):
-    """Return the provider-specific model string for a canonical model ID."""
-    mapping = MODEL_MAP.get(canonical)
-    if mapping:
-        return mapping.get(provider, canonical)
-    return canonical
 
 INACTIVITY_TIMEOUT_SEC = 600  # 10 minutes
 
@@ -657,6 +571,7 @@ class GnomeSpeaksService:
     _SYNC_FLAGS = (
         "conversation_mode", "continuous_dictation", "dictation_mode",
         "terminal_mode", "skip_final_paste", "read_notifications",
+        "llm_provider", "llm_model", "llm_api_key", "llm_system_prompt",
     )
 
     def _reload_config_flags(self):
@@ -1864,189 +1779,29 @@ class GnomeSpeaksService:
     def _stream_conversation_worker(self, user_text):
         """Stream LLM response and start TTS on each complete sentence.
 
-        Falls back to the synchronous path for providers that don't support
-        streaming (cloud-chat-assistant/bedrock).
+        Uses the unified llm_stream library for all providers (including bedrock).
         """
         try:
-            import requests as http_requests
-
-            api_key = CONFIG.get("llm_api_key", "")
             provider = CONFIG.get("llm_provider", "anthropic")
-            model = _resolve_model(CONFIG.get("llm_model", "claude-opus-4.6"), provider)
+            model = CONFIG.get("llm_model", "claude-opus-4.6")
 
             system_prompt, history = self._build_context(user_text)
 
-            # --- Build streaming request per provider ---
+            # Build messages and config for stream_chat
+            messages = list(history) + [{"role": "user", "content": user_text}]
+            cfg = {"api_key": CONFIG.get("llm_api_key", "")}
+            cfg.update(self._load_cca_config())
 
-            if provider == "anthropic":
-                if not api_key:
-                    GLib.idle_add(self._emit_error, "No Anthropic API key configured")
-                    self._set_state("idle")
-                    return
-                msgs = list(history) + [{"role": "user", "content": user_text}]
-                resp = http_requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "max_tokens": 1024,
-                        "system": system_prompt,
-                        "messages": msgs,
-                        "stream": True,
-                    },
-                    timeout=60,
-                    stream=True,
+            try:
+                token_iter = stream_chat(
+                    provider=provider,
+                    model=model,
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    config=cfg,
                 )
-                resp.raise_for_status()
-                token_iter = self._iter_anthropic_tokens(resp)
-
-            elif provider == "openai":
-                if not api_key:
-                    GLib.idle_add(self._emit_error, "No OpenAI API key configured")
-                    self._set_state("idle")
-                    return
-                msgs = [{"role": "system", "content": system_prompt}]
-                msgs.extend(history)
-                msgs.append({"role": "user", "content": user_text})
-                resp = http_requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": msgs,
-                        "max_tokens": 1024,
-                        "stream": True,
-                    },
-                    timeout=60,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                token_iter = self._iter_openai_tokens(resp)
-
-            elif provider == "azure":
-                cca_config = self._load_cca_config()
-                azure_key = cca_config.get("api_key", "")
-                endpoint = cca_config.get("endpoint", "")
-                if not azure_key or not endpoint:
-                    GLib.idle_add(self._emit_error, "Azure AI not configured in cloud-chat-assistant config")
-                    self._set_state("idle")
-                    return
-                msgs = [{"role": "system", "content": system_prompt}]
-                msgs.extend(history)
-                msgs.append({"role": "user", "content": user_text})
-                serverless = [
-                    "grok-3", "grok-3-mini", "DeepSeek-R1",
-                    "Meta-Llama-3.1-405B-Instruct", "Meta-Llama-3.1-8B-Instruct",
-                    "Llama-3.2-11B-Vision-Instruct", "Llama-3.2-90B-Vision-Instruct",
-                    "Llama-3.3-70B-Instruct", "Llama-4-Scout-17B-16E-Instruct",
-                    "Phi-4", "Cohere-command-r-plus-08-2024", "Cohere-command-r-08-2024",
-                    "Codestral-2501", "Ministral-3B",
-                ]
-                if model in serverless:
-                    url = f"{endpoint}/models/chat/completions?api-version=2024-12-01-preview"
-                    body = {"model": model, "messages": msgs, "max_tokens": 1024, "stream": True}
-                else:
-                    url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview"
-                    body = {"messages": msgs, "max_tokens": 1024, "stream": True}
-                resp = http_requests.post(
-                    url,
-                    headers={"api-key": azure_key, "Content-Type": "application/json"},
-                    json=body, timeout=60,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                token_iter = self._iter_openai_tokens(resp)  # Azure uses OpenAI SSE format
-
-            elif provider == "digitalocean":
-                do_key = api_key or self._load_cca_config().get("do_api_key", "")
-                if not do_key:
-                    GLib.idle_add(self._emit_error, "No DigitalOcean API key configured")
-                    self._set_state("idle")
-                    return
-                msgs = [{"role": "system", "content": system_prompt}]
-                msgs.extend(history)
-                msgs.append({"role": "user", "content": user_text})
-                resp = http_requests.post(
-                    "https://inference.do-ai.run/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {do_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": msgs,
-                        "max_completion_tokens": max(256, 1024),
-                        "stream": True,
-                    },
-                    timeout=60,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                token_iter = self._iter_openai_tokens(resp)
-
-            elif provider == "google":
-                cca_config = self._load_cca_config()
-                google_key = cca_config.get("google_api_key", "")
-                if not google_key:
-                    GLib.idle_add(self._emit_error, "Google API key not configured")
-                    self._set_state("idle")
-                    return
-                contents = []
-                for msg in history:
-                    role = "model" if msg["role"] == "assistant" else "user"
-                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-                contents.append({"role": "user", "parts": [{"text": user_text}]})
-                url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                       f"{model}:streamGenerateContent?alt=sse&key={google_key}")
-                resp = http_requests.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "system_instruction": {"parts": [{"text": system_prompt}]},
-                        "contents": contents,
-                    },
-                    timeout=60,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                token_iter = self._iter_google_tokens(resp)
-
-            elif provider == "puter":
-                puter_key = api_key or self._load_cca_config().get("puter_auth_token", "")
-                if not puter_key:
-                    GLib.idle_add(self._emit_error, "No Puter auth token configured")
-                    self._set_state("idle")
-                    return
-                msgs = [{"role": "system", "content": system_prompt}]
-                msgs.extend(history)
-                msgs.append({"role": "user", "content": user_text})
-                resp = http_requests.post(
-                    "https://api.puter.com/puterai/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {puter_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": msgs,
-                        "max_tokens": 1024,
-                        "stream": True,
-                    },
-                    timeout=60,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                token_iter = self._iter_openai_tokens(resp)  # Puter uses OpenAI SSE format
-
-            else:
-                GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
+            except LLMStreamError as exc:
+                GLib.idle_add(self._emit_error, str(exc))
                 self._set_state("idle")
                 return
 
@@ -2194,176 +1949,18 @@ class GnomeSpeaksService:
                     else False
                 ))
 
-    # -- SSE token iterators per provider ----------------------------------
-
-    def _iter_anthropic_tokens(self, resp):
-        """Yield text tokens from Anthropic SSE stream."""
-        for line in resp.iter_lines(decode_unicode=True):
-            if self._stop_event.is_set():
-                break
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]  # strip "data: " prefix
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                event = json.loads(data_str)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if event.get("type") == "content_block_delta":
-                text = event.get("delta", {}).get("text", "")
-                if text:
-                    yield text
-
-    def _iter_openai_tokens(self, resp):
-        """Yield text tokens from OpenAI/Azure SSE stream."""
-        for line in resp.iter_lines(decode_unicode=True):
-            if self._stop_event.is_set():
-                break
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                event = json.loads(data_str)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            choices = event.get("choices", [])
-            if choices:
-                text = choices[0].get("delta", {}).get("content", "")
-                if text:
-                    yield text
-
-    def _iter_google_tokens(self, resp):
-        """Yield text tokens from Google Gemini SSE stream."""
-        for line in resp.iter_lines(decode_unicode=True):
-            if self._stop_event.is_set():
-                break
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                event = json.loads(data_str)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            # Gemini streaming format: candidates[0].content.parts[0].text
-            candidates = event.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    text = parts[0].get("text", "")
-                    if text:
-                        yield text
-
-    # -- Conversation worker (delegates to streaming when possible) --------
+    # -- Conversation worker ------------------------------------------------
 
     def _conversation_worker(self, user_text):
-        """Send transcribed text to an LLM and speak the response."""
-        provider = CONFIG.get("llm_provider", "anthropic")
+        """Send transcribed text to an LLM and speak the response.
 
-        # Streaming is supported for direct API providers.
-        # cloud-chat-assistant/bedrock use an async call_llm that doesn't
-        # support streaming, so fall back to the synchronous path.
-        if provider in ("anthropic", "openai", "azure", "google", "digitalocean", "puter"):
-            return self._stream_conversation_worker(user_text)
-
-        # --- Synchronous fallback for cloud-chat-assistant / bedrock ---
-        try:
-            import requests as http_requests
-
-            api_key = CONFIG.get("llm_api_key", "")
-            model = _resolve_model(CONFIG.get("llm_model", "claude-opus-4.6"), provider)
-
-            # Build system prompt with dynamic context + conversation history
-            system_prompt, history = self._build_context(user_text)
-
-            reply = None
-
-            if provider in ("cloud-chat-assistant", "bedrock"):
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(history)
-                messages.append({"role": "user", "content": user_text})
-                reply = self._call_cloud_chat_assistant(messages, model)
-            else:
-                GLib.idle_add(self._emit_error, f"Unknown LLM provider: {provider}")
-                self._set_state("idle")
-                return
-
-            if reply:
-                # Track conversation history
-                with self._conversation_lock:
-                    self._conversation_history.append({"role": "user", "content": user_text})
-                    self._conversation_history.append({"role": "assistant", "content": reply})
-                # Parse <type>...</type> tags — type that text at cursor, speak the rest
-                type_text, speak_text = self._parse_type_tags(reply)
-                if type_text:
-                    log.info("Typing %d chars at cursor", len(type_text))
-                    # Paste via clipboard for reliability — ydotool keystroke
-                    # simulation at high speed drops spaces in terminals
-                    _clipboard_paste(type_text)
-
-                # If there's nothing left to speak, go idle and maybe loop
-                if not speak_text or not speak_text.strip():
-                    self._set_state("idle")
-                    self._maybe_loop_restart()
-                    return
-
-                self._set_state("speaking")
-                state._cancel_event.clear()
-                # Show reply text as live subtitle on badge
-                GLib.idle_add(self._emit_partial_transcription, speak_text)
-
-                # On headphones, prewarm recorder during TTS for fast turnaround.
-                # On speakers (half-duplex), DON'T prewarm during TTS — we want
-                # the mic closed while audio plays to prevent echo pickup.
-                if not CONFIG.get("half_duplex", False):
-                    _schedule_warmup()
-
-                # Start subtitle progress thread for progressive reveal
-                _sf = 22.0 if self._voice_quality == "fast" else 15.0
-                _sd = max(1.0, len(speak_text) / _sf)
-                _ss = threading.Event()
-                _st = threading.Thread(
-                    target=self._run_subtitle_progress,
-                    args=(speak_text, _sd, _ss), daemon=True)
-                _st.start()
-
-                # Speak the reply, then go idle
-                log.info("Conversation reply: %s", speak_text[:100])
-                speech_tts.tts(speak_text, quality=self._voice_quality,
-                                audio_level_cb=self._tts_level_cb)
-
-                # Stop subtitle progress thread
-                _ss.set()
-                _st.join(timeout=1.0)
-
-                # Half-duplex drain: on speakers, wait for audio buffers to
-                # fully flush before opening mic. PipeWire/Pulse can buffer
-                # ~200-500ms after the player process exits.
-                if CONFIG.get("half_duplex", False):
-                    time.sleep(0.5)
-
-                self._set_state("idle")
-                self._maybe_loop_restart()
-            else:
-                self._set_state("idle")
-        except Exception as exc:
-            log.exception("Conversation failed: %s", exc)
-            GLib.idle_add(self._emit_error, f"LLM error: {exc}")
+        All providers (including bedrock) now stream via llm_stream.
+        """
+        if not stream_chat:
+            GLib.idle_add(self._emit_error, "LLM streaming library not available (llm_stream not found)")
             self._set_state("idle")
-            # Retry loop after transient error
-            if (CONFIG.get("continuous_dictation", False)
-                    and CONFIG.get("conversation_mode", False)
-                    and not self._stop_event.is_set()):
-                log.info("AI+Loop: retry after error (2s delay)")
-                GLib.timeout_add(2000, lambda: (
-                    (self.start_listening(quick=True), False)[-1]
-                    if not self._stop_event.is_set()
-                    else False
-                ))
+            return
+        return self._stream_conversation_worker(user_text)
 
     def _load_cca_config(self):
         """Load cloud-chat-assistant config."""
@@ -2374,69 +1971,6 @@ class GnomeSpeaksService:
                 return _json.load(f)
         except Exception:
             return {}
-
-    def _call_cloud_chat_assistant(self, messages, model):
-        """Call cloud-chat-assistant's call_llm with a pre-built messages list."""
-        if os.path.isdir(_CCA_PATH):
-            try:
-                import asyncio
-                if _CCA_PATH not in sys.path:
-                    sys.path.insert(0, _CCA_PATH)
-                import mcp_cloud_chat as cca
-                cca_config = self._load_cca_config()
-                for k, v in cca_config.items():
-                    cca.CONFIG[k] = v
-                cca.CONFIG["deployment"] = model
-                cca.CONFIG["model"] = model
-                cca.CONFIG["model_type"] = cca_config.get("model_type", "bedrock")
-                loop = asyncio.new_event_loop()
-                try:
-                    import httpx
-                    async def _do_chat():
-                        async with httpx.AsyncClient(timeout=60) as client:
-                            response, usage, latency = await cca.call_llm(client, messages, None, model)
-                            return response
-                    result = loop.run_until_complete(_do_chat())
-                    if result and not result.startswith("Error"):
-                        return result
-                    log.warning("cloud-chat-assistant returned: %s", result[:200] if result else "empty")
-                    return None
-                finally:
-                    loop.close()
-            except Exception as exc:
-                log.warning("cloud-chat-assistant direct call failed: %s, falling back", exc)
-        # Fallback: use Anthropic API with messages converted
-        import requests as http_requests
-        api_key = CONFIG.get("llm_api_key", "")
-        if not api_key:
-            GLib.idle_add(self._emit_error, "No API key and cloud-chat-assistant unavailable")
-            return None
-        # Extract system prompt and user/assistant messages for Anthropic format
-        system_prompt = ""
-        anthropic_msgs = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system_prompt = msg["content"]
-            else:
-                anthropic_msgs.append(msg)
-        resp = http_requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model if "claude" in model else "claude-opus-4-6",
-                "max_tokens": 1024,
-                "system": system_prompt,
-                "messages": anthropic_msgs,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("content", [{}])[0].get("text", "") if data.get("content") else None
 
     # -- Stop --------------------------------------------------------------
 

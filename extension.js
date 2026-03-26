@@ -496,7 +496,7 @@ export default class GnomeSpeaksExtension extends Extension {
                     this._dragBadgeStartY + dy
                 );
                 this._customPosition = {x: actor.x, y: actor.y};
-                this._positionGlowRing();
+                this._positionWaveform();
                 this._positionSubtitleOverlay();
                 if (this._settings) {
                     this._settings.set_int('badge-position-x', Math.round(actor.x));
@@ -520,15 +520,26 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._signals.push({obj: this._badge, id: releaseId});
 
-        // Glow ring — audio-reactive halo behind badge (on uiGroup so it renders behind)
-        this._glowRing = new St.Bin({
-            style_class: 'gnome-speaks-glow',
+        // Waveform bars — audio-reactive visualization below badge
+        this._waveformBars = [];
+        this._waveformLevels = new Array(9).fill(0);
+        this._waveformContainer = new St.BoxLayout({
+            style_class: 'gnome-speaks-waveform',
             reactive: false,
             can_focus: false,
+            vertical: false,
             opacity: 0,
         });
-        this._glowRing.set_pivot_point(0.5, 0.5);
-        Main.uiGroup.add_child(this._glowRing);
+        for (let i = 0; i < 9; i++) {
+            let bar = new St.Bin({
+                style_class: 'gnome-speaks-waveform-bar',
+                reactive: false,
+            });
+            bar.set_pivot_point(0.5, 1.0); // anchor bottom so bars grow upward
+            this._waveformBars.push(bar);
+            this._waveformContainer.add_child(bar);
+        }
+        Main.uiGroup.add_child(this._waveformContainer);
 
         Main.layoutManager.addTopChrome(this._badge, {
             affectsInputRegion: true,
@@ -916,11 +927,12 @@ export default class GnomeSpeaksExtension extends Extension {
 
         this._destroyContextMenu();
 
-        if (this._glowRing) {
-            this._glowRing.remove_all_transitions();
-            Main.uiGroup.remove_child(this._glowRing);
-            this._glowRing.destroy();
-            this._glowRing = null;
+        if (this._waveformContainer) {
+            this._waveformContainer.remove_all_transitions();
+            Main.uiGroup.remove_child(this._waveformContainer);
+            this._waveformContainer.destroy();
+            this._waveformContainer = null;
+            this._waveformBars = [];
         }
 
         if (this._badge) {
@@ -1127,7 +1139,7 @@ export default class GnomeSpeaksExtension extends Extension {
                     && cy < monitor.y + monitor.height - 20;
                 if (inBounds) {
                     this._badge.set_position(cx, cy);
-                    this._positionGlowRing();
+                    this._positionWaveform();
                     this._positionSubtitleOverlay();
                     return;
                 }
@@ -1139,7 +1151,7 @@ export default class GnomeSpeaksExtension extends Extension {
                 }
             } else {
                 this._badge.set_position(this._customPosition.x, this._customPosition.y);
-                this._positionGlowRing();
+                this._positionWaveform();
                 this._positionSubtitleOverlay();
                 return;
             }
@@ -1166,24 +1178,21 @@ export default class GnomeSpeaksExtension extends Extension {
             let y = monitor.y + monitor.height - 80;
 
             this._badge.set_position(x, y);
-            this._positionGlowRing();
+            this._positionWaveform();
             this._positionSubtitleOverlay();
             return GLib.SOURCE_REMOVE;
         });
         this._trackTimeout(timeoutId);
     }
 
-    _positionGlowRing() {
-        if (!this._glowRing || !this._badge) return;
+    _positionWaveform() {
+        if (!this._waveformContainer || !this._badge) return;
         let badge = this._badge;
-        // Size the glow to 2.5x badge size for visible halo
-        let size = Math.max(badge.width, badge.height) * 2.5;
-        if (size <= 0) size = 120;
-        this._glowRing.set_size(size, size);
-        // Center on badge
-        this._glowRing.set_position(
-            badge.x + badge.width / 2 - size / 2,
-            badge.y + badge.height / 2 - size / 2
+        let barCount = this._waveformBars.length;
+        let totalWidth = barCount * 4 + (barCount - 1) * 3; // 4px bars + 3px gaps
+        this._waveformContainer.set_position(
+            badge.x + badge.width / 2 - totalWidth / 2,
+            badge.y + badge.height + 6
         );
     }
 
@@ -1392,17 +1401,17 @@ export default class GnomeSpeaksExtension extends Extension {
         this._badge.remove_style_class_name('gnome-speaks-error');
         this._badge.add_style_class_name(config.styleClass);
 
-        // Update glow ring color for state
-        if (this._glowRing) {
-            this._glowRing.remove_style_class_name('gnome-speaks-glow-listening');
-            this._glowRing.remove_style_class_name('gnome-speaks-glow-speaking');
-            this._glowRing.remove_style_class_name('gnome-speaks-glow-processing');
-            let glowClass = {
-                [States.LISTENING]: 'gnome-speaks-glow-listening',
-                [States.SPEAKING]: 'gnome-speaks-glow-speaking',
-                [States.PROCESSING]: 'gnome-speaks-glow-processing',
+        // Update waveform bar color for state
+        if (this._waveformBars) {
+            let barClass = {
+                [States.LISTENING]: 'gnome-speaks-waveform-bar-listening',
+                [States.SPEAKING]: 'gnome-speaks-waveform-bar-speaking',
             }[newState];
-            if (glowClass) this._glowRing.add_style_class_name(glowClass);
+            for (let bar of this._waveformBars) {
+                bar.remove_style_class_name('gnome-speaks-waveform-bar-listening');
+                bar.remove_style_class_name('gnome-speaks-waveform-bar-speaking');
+                if (barClass) bar.add_style_class_name(barClass);
+            }
         }
 
         // Update icon
@@ -1469,12 +1478,13 @@ export default class GnomeSpeaksExtension extends Extension {
             this._cancelTimeout('word-highlight-fade');
         }
 
-        // Fade glow ring when leaving active states
-        if (newState === States.IDLE && this._glowRing) {
-            this._glowRing.ease({
-                opacity: 0, scale_x: 1.0, scale_y: 1.0,
-                duration: 400, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        // Fade waveform when leaving active states
+        if (newState === States.IDLE && this._waveformContainer) {
+            this._waveformContainer.ease({
+                opacity: 0, duration: 400,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
+            this._waveformLevels.fill(0);
         }
 
         // Handle animations
@@ -1512,7 +1522,7 @@ export default class GnomeSpeaksExtension extends Extension {
                 // Custom position — still need to reposition glow and subtitle
                 GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
                     if (this._destroyed) return GLib.SOURCE_REMOVE;
-                    this._positionGlowRing();
+                    this._positionWaveform();
                     this._positionSubtitleOverlay();
                     return GLib.SOURCE_REMOVE;
                 });
@@ -1860,32 +1870,43 @@ export default class GnomeSpeaksExtension extends Extension {
 
         let clampedLevel = Math.min(level, 1.0);
 
-        // Badge scale: 1.0 to 1.15 (more dramatic than before)
-        let scale = 1.0 + clampedLevel * 0.15;
+        // Badge scale: 1.0 to 1.08 (subtle breathing)
+        let scale = 1.0 + clampedLevel * 0.08;
         this._badge.set_scale(scale, scale);
 
-        // Glow ring: opacity 0→220, scale 1.0→1.4
-        if (this._glowRing) {
-            this._glowRing.opacity = Math.floor(clampedLevel * 220);
-            let glowScale = 1.0 + clampedLevel * 0.4;
-            this._glowRing.set_scale(glowScale, glowScale);
+        // Waveform bars: shift buffer and update heights
+        if (this._waveformContainer && this._waveformBars.length > 0) {
+            // Show waveform when audio arrives
+            if (this._waveformContainer.opacity === 0) {
+                this._waveformContainer.show();
+                this._waveformContainer.ease({
+                    opacity: 255, duration: 200,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                });
+            }
+            // Shift levels left, add new sample at end
+            this._waveformLevels.shift();
+            this._waveformLevels.push(clampedLevel);
+            // Set bar heights (max 24px)
+            for (let i = 0; i < this._waveformBars.length; i++) {
+                let h = Math.max(3, Math.floor(this._waveformLevels[i] * 24));
+                this._waveformBars[i].set_height(h);
+            }
         }
 
-        // Resume pulse + fade glow after 800ms of silence (long enough to
-        // avoid jittery pulse/audio fighting from intermittent ambient noise)
+        // Resume pulse + fade waveform after 800ms of silence
         this._cancelTimeout('audio-pulse-resume');
         let timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
             this._removeTimeout('audio-pulse-resume');
             if (this._destroyed || !this._badge) return GLib.SOURCE_REMOVE;
-            // Fade glow out smoothly
-            if (this._glowRing) {
-                this._glowRing.ease({
-                    opacity: 0,
-                    scale_x: 1.0,
-                    scale_y: 1.0,
-                    duration: 600,
+            // Fade waveform out
+            if (this._waveformContainer) {
+                this._waveformContainer.ease({
+                    opacity: 0, duration: 400,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                 });
+                // Reset levels
+                this._waveformLevels.fill(0);
             }
             if (this._state === States.LISTENING || this._state === States.SPEAKING)
                 this._startPulse();

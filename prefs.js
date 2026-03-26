@@ -173,6 +173,33 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'You are a helpful voice assistant. Keep responses concise and conversational.',
             'Instructions for the LLM persona');
 
+        // Restart Service button
+        const restartRow = new Adw.ActionRow({
+            title: 'Restart Service',
+            subtitle: 'Apply provider/model changes immediately',
+        });
+        const restartBtn = new Gtk.Button({
+            label: 'Restart',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['suggested-action'],
+        });
+        restartBtn.connect('clicked', () => {
+            try {
+                GLib.spawn_command_line_async('systemctl --user restart gnome-speaks.service');
+                restartBtn.label = 'Restarted';
+                restartBtn.sensitive = false;
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+                    restartBtn.label = 'Restart';
+                    restartBtn.sensitive = true;
+                    return GLib.SOURCE_REMOVE;
+                });
+            } catch (e) {
+                log(`Failed to restart service: ${e.message}`);
+            }
+        });
+        restartRow.add_suffix(restartBtn);
+        aiGroup.add(restartRow);
+
         // ── Continuous Dictation ──
         const contGroup = new Adw.PreferencesGroup({
             title: 'Continuous Dictation',

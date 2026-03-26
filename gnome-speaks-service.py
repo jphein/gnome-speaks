@@ -780,10 +780,15 @@ class GnomeSpeaksService:
         If quick=True, skip config reload and audio detection refresh.
         Used for tight loop restarts where config hasn't changed.
         """
-        # Prevent concurrent STT threads from rapid clicks
+        # Prevent concurrent STT threads from rapid clicks.
+        # For quick (loop) restarts, briefly wait for the old thread to finish
+        # since the loop restart fires before the thread fully exits.
         if hasattr(self, '_stt_thread') and self._stt_thread and self._stt_thread.is_alive():
-            log.warning("STT thread already running, ignoring start_listening")
-            return "error: STT thread already running"
+            if quick:
+                self._stt_thread.join(timeout=1.0)
+            if self._stt_thread and self._stt_thread.is_alive():
+                log.warning("STT thread already running, ignoring start_listening")
+                return "error: STT thread already running"
 
         if not quick:
             self._reload_config_flags()

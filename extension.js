@@ -1864,6 +1864,9 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _trackTimeout(id, name = null) {
+        // Deduplicate: cancel any existing timeout with the same name
+        // to prevent orphaned timers that fire unexpectedly.
+        if (name) this._cancelTimeout(name);
         this._timeouts.push({id, name});
     }
 

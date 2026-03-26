@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import queue
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import uuid
@@ -266,10 +267,15 @@ def clipboard_write(text):
 
 _TYPING_TOOL = None
 _YDOTOOL_V1 = False  # True if ydotool >= 1.0 (daemon mode, different CLI flags)
+_typing_tool_detected = False
 
 
 def _detect_typing_tool():
-    """Detect the best available typing tool at startup (avoids repeated PATH lookups)."""
+    """Detect the best available typing tool. Lazy — runs once on first call."""
+    global _typing_tool_detected
+    if _typing_tool_detected:
+        return
+    _typing_tool_detected = True
     global _TYPING_TOOL, _YDOTOOL_V1
     if shutil.which("ydotool"):
         _TYPING_TOOL = "ydotool"
@@ -296,6 +302,9 @@ def _is_ydotoold_running():
         return False
 
 
+_ydotool_reset_lock = threading.Lock()
+
+
 def _reset_ydotoold():
     """Restart ydotoold to clear any stuck key state on its virtual device.
 
@@ -303,9 +312,13 @@ def _reset_ydotoold():
     the virtual uinput device retains that key as "pressed". The Wayland
     compositor then suppresses that key from all physical keyboards. Restarting
     the daemon destroys the old virtual device and creates a clean one.
+
+    Uses a lock to prevent two threads from restarting simultaneously.
     """
     if not _YDOTOOL_V1:
         return
+    if not _ydotool_reset_lock.acquire(blocking=False):
+        return  # another thread is already restarting
     try:
         subprocess.run(
             ["systemctl", "--user", "restart", "ydotoold"],
@@ -317,6 +330,8 @@ def _reset_ydotoold():
         log.info("Reset ydotoold to clear stuck key state")
     except Exception as e:
         log.warning("Failed to restart ydotoold: %s", e)
+    finally:
+        _ydotool_reset_lock.release()
 
 
 def _run_ydotool(args, **kwargs):
@@ -650,7 +665,11 @@ class GnomeSpeaksService:
     }
 
     def _set_state(self, new_state):
-        """Set state and emit StateChanged on the main loop."""
+        """Set state and emit StateChanged on the main loop.
+
+        Signal emission is queued inside the lock to prevent another thread
+        from changing state between the assignment and the GLib.idle_add.
+        """
         with self._state_lock:
             if self._state == new_state:
                 return
@@ -659,8 +678,8 @@ class GnomeSpeaksService:
                 log.warning("Unexpected transition %s -> %s (forcing)", self._state, new_state)
             old = self._state
             self._state = new_state
+            GLib.idle_add(self._emit_state_changed, new_state)
         log.info("State %s -> %s", old, new_state)
-        GLib.idle_add(self._emit_state_changed, new_state)
         self._reset_inactivity_timer()
 
     def _emit_state_changed(self, state_str):
@@ -886,10 +905,16 @@ class GnomeSpeaksService:
         """
         _log_tag = "stt-gnome"
         _dbg = "/tmp/speech-debug.log" if (os.environ.get("SPEECH_DEBUG") or CONFIG.get("debug")) else None
+        _DBG_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 
         def _log(msg):
             log.debug("STT: %s", msg)
             if _dbg:
+                try:
+                    if os.path.getsize(_dbg) > _DBG_MAX_SIZE:
+                        os.rename(_dbg, _dbg + ".old")
+                except OSError:
+                    pass
                 with open(_dbg, "a") as f:
                     f.write(f"[{_log_tag} {time.strftime('%H:%M:%S')}] {msg}\n")
 
@@ -1409,17 +1434,19 @@ class GnomeSpeaksService:
             )
             sub_thread.start()
 
-            result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
-                                    audio_level_cb=self._tts_level_cb,
-                                    output_file=getattr(self, '_pending_output_file', None))
-            # Clear one-shot output file after use
-            self._pending_output_file = None
+            try:
+                result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
+                                        audio_level_cb=self._tts_level_cb,
+                                        output_file=getattr(self, '_pending_output_file', None))
+                # Clear one-shot output file after use
+                self._pending_output_file = None
 
-            # Stop subtitle progress thread
-            sub_stop.set()
-            sub_thread.join(timeout=1.0)
-            if result.get("error"):
-                GLib.idle_add(self._emit_error, result["error"])
+                if result.get("error"):
+                    GLib.idle_add(self._emit_error, result["error"])
+            finally:
+                # Always stop subtitle thread, even if TTS raises
+                sub_stop.set()
+                sub_thread.join(timeout=1.0)
         except Exception as exc:
             log.exception("Speak failed: %s", exc)
             GLib.idle_add(self._emit_error, f"Speak failed: {exc}")
@@ -2136,6 +2163,7 @@ class SpeechHTTPHandler(http.server.BaseHTTPRequestHandler):
     """Lightweight REST handler exposing TTS control to localhost callers."""
 
     service = None  # set to GnomeSpeaksService instance before server starts
+    timeout = 10  # seconds — prevents slow/hung clients from blocking worker threads
 
     # Voices cache: (data, timestamp)
     _voices_cache = (None, 0.0)
@@ -2313,6 +2341,26 @@ class DBusHandler:
 
     def __init__(self, service):
         self.service = service
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dbus")
+
+    def _run_async(self, invocation, variant_type, fn, *args):
+        """Run fn(*args) in the thread pool; return result via GLib.idle_add."""
+        def _worker():
+            try:
+                result = fn(*args)
+                GLib.idle_add(
+                    lambda: invocation.return_value(
+                        GLib.Variant(variant_type, (result,))
+                    ) or False
+                )
+            except Exception as exc:
+                log.exception("Async D-Bus call failed: %s", exc)
+                GLib.idle_add(
+                    lambda: invocation.return_dbus_error(
+                        "org.gnome.Speaks.Error", str(exc)
+                    ) or False
+                )
+        self._pool.submit(_worker)
 
     def handle_method_call(self, connection, sender, object_path, interface_name,
                            method_name, parameters, invocation):
@@ -2323,57 +2371,21 @@ class DBusHandler:
                 invocation.return_value(GLib.Variant("(s)", (result,)))
 
             elif method_name == "StopListening":
-                # StopListening can block while waiting for transcription
-                def _do():
-                    result = self.service.stop_listening()
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(s)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do, daemon=True).start()
+                self._run_async(invocation, "(s)", self.service.stop_listening)
 
             elif method_name == "Speak":
                 text = parameters.unpack()[0]
-                def _do_speak():
-                    result = self.service.speak(text)
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(b)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do_speak, daemon=True).start()
+                self._run_async(invocation, "(b)", self.service.speak, text)
 
             elif method_name == "SpeakClipboard":
-                def _do_speak_clip():
-                    result = self.service.speak_clipboard()
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(b)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do_speak_clip, daemon=True).start()
+                self._run_async(invocation, "(b)", self.service.speak_clipboard)
 
             elif method_name == "SpeakSelection":
-                def _do_speak_sel():
-                    result = self.service.speak_selection()
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(b)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do_speak_sel, daemon=True).start()
+                self._run_async(invocation, "(b)", self.service.speak_selection)
 
             elif method_name == "Talk":
                 text = parameters.unpack()[0]
-                def _do_talk():
-                    result = self.service.talk(text)
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(s)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do_talk, daemon=True).start()
+                self._run_async(invocation, "(s)", self.service.talk, text)
 
             elif method_name == "SetLanguage":
                 lang = parameters.unpack()[0]
@@ -2450,15 +2462,7 @@ class DBusHandler:
                 invocation.return_value(GLib.Variant("(s)", (result,)))
 
             elif method_name == "Stop":
-                # Stop can block while joining threads — run async
-                def _do_stop():
-                    result = self.service.stop()
-                    GLib.idle_add(
-                        lambda: invocation.return_value(
-                            GLib.Variant("(b)", (result,))
-                        ) or False
-                    )
-                threading.Thread(target=_do_stop, daemon=True).start()
+                self._run_async(invocation, "(b)", self.service.stop)
 
             elif method_name == "GetState":
                 result = self.service.current_state
@@ -2541,8 +2545,12 @@ def main():
         _SPEECH_ENGINE, CONFIG.get("region"), HAS_VAD, HAS_WS, HAS_WHISPER,
     )
 
-    _detect_typing_tool()
-    _reset_ydotoold()
+    # Detect typing tool in background to avoid blocking startup with
+    # shutil.which() + pidof subprocess calls (~100-200ms).
+    def _init_typing():
+        _detect_typing_tool()
+        _reset_ydotoold()
+    threading.Thread(target=_init_typing, daemon=True).start()
 
     # Detect audio output device and auto-enable echo cancellation
     _refresh_audio_detection()

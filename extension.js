@@ -376,10 +376,8 @@ export default class GnomeSpeaksExtension extends Extension {
         }
     }
 
-    _onNotification(notification) {
-        // Only read notifications if enabled in config.
-        // Cache the config to avoid blocking the compositor with disk I/O
-        // on every notification. Refresh cache at most once per 10 seconds.
+    _getConfigFlag(key, defaultVal = true) {
+        // Cached config read — refreshes at most once per 10 seconds
         let now = GLib.get_monotonic_time();
         if (!this._notifConfigCache || (now - this._notifConfigCacheTime) > 10000000) {
             let configPath = GLib.build_filenamev([
@@ -398,8 +396,12 @@ export default class GnomeSpeaksExtension extends Extension {
             }
             this._notifConfigCacheTime = now;
         }
+        let val = this._notifConfigCache[key];
+        return val !== undefined ? val : defaultVal;
+    }
 
-        if (!this._notifConfigCache.read_notifications)
+    _onNotification(notification) {
+        if (!this._getConfigFlag('read_notifications', false))
             return;
 
         let title = notification.title || '';
@@ -1642,6 +1644,8 @@ export default class GnomeSpeaksExtension extends Extension {
 
         if (!this._badge)
             return;
+        if (!this._getConfigFlag('show_badge_pulse', true))
+            return;
 
         this._pulseUp = true;
         this._pulseActive = true;
@@ -1810,15 +1814,16 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         this._lastPartialText = text;
 
-        // Build word-level markup (new words highlighted)
-        let markup = this._buildWordMarkup(text);
-        this._pendingPartialMarkup = markup;
+        // Build word-level markup or plain text depending on toggle
+        let useMarkup = this._getConfigFlag('show_word_highlights', true);
+        let displayContent = useMarkup ? this._buildWordMarkup(text) : text;
+        this._pendingPartialMarkup = displayContent;
 
         if (this._partialDebounceId)
             return;
 
         // First update — render immediately
-        this._showSubtitle(markup, true, true);
+        this._showSubtitle(displayContent, true, useMarkup);
         this._lastPartialTime = GLib.get_monotonic_time();
 
         // Schedule gate for coalescing (200ms for snappier word-by-word feel)
@@ -1828,26 +1833,29 @@ export default class GnomeSpeaksExtension extends Extension {
             if (this._destroyed)
                 return GLib.SOURCE_REMOVE;
             if (this._pendingPartialMarkup) {
-                let freshMarkup = this._buildWordMarkup(this._lastPartialText);
-                this._showSubtitle(freshMarkup, true, true);
+                let um = this._getConfigFlag('show_word_highlights', true);
+                let fresh = um ? this._buildWordMarkup(this._lastPartialText) : this._lastPartialText;
+                this._showSubtitle(fresh, true, um);
             }
             return GLib.SOURCE_REMOVE;
         });
         this._partialDebounceId = timeoutId;
         this._trackTimeout(timeoutId, 'partial-debounce');
 
-        // Schedule highlight fade refresh after 650ms
-        this._cancelTimeout('word-highlight-fade');
-        let fadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 650, () => {
-            this._removeTimeout('word-highlight-fade');
-            if (this._destroyed) return GLib.SOURCE_REMOVE;
-            if (this._lastPartialText && this._state === States.LISTENING) {
-                let freshMarkup = this._buildWordMarkup(this._lastPartialText);
-                this._showSubtitle(freshMarkup, true, true);
-            }
-            return GLib.SOURCE_REMOVE;
-        });
-        this._trackTimeout(fadeId, 'word-highlight-fade');
+        // Schedule highlight fade refresh after 650ms (only if word highlights on)
+        if (useMarkup) {
+            this._cancelTimeout('word-highlight-fade');
+            let fadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 650, () => {
+                this._removeTimeout('word-highlight-fade');
+                if (this._destroyed) return GLib.SOURCE_REMOVE;
+                if (this._lastPartialText && this._state === States.LISTENING) {
+                    let freshMarkup = this._buildWordMarkup(this._lastPartialText);
+                    this._showSubtitle(freshMarkup, true, true);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+            this._trackTimeout(fadeId, 'word-highlight-fade');
+        }
     }
 
     _onSubtitleUpdate(text, duration, percent) {
@@ -1982,12 +1990,13 @@ export default class GnomeSpeaksExtension extends Extension {
         let clampedLevel = Math.min(level, 1.0);
 
         // Badge scale: 1.0 to 1.08 (subtle breathing)
-        let scale = 1.0 + clampedLevel * 0.08;
-        this._badge.set_scale(scale, scale);
+        if (this._getConfigFlag('show_badge_scale', true)) {
+            let scale = 1.0 + clampedLevel * 0.08;
+            this._badge.set_scale(scale, scale);
+        }
 
-        // VAD indicator — separate glowing dot, appears when any speech-level audio.
-        // Sticky 1s hold so it stays visible through natural pauses.
-        if (this._vadDot) {
+        // VAD indicator — separate glowing dot (respects toggle)
+        if (this._vadDot && this._getConfigFlag('show_vad_dot', true)) {
             if (clampedLevel > 0.02) {
                 this._lastVadTime = now;
                 if (this._vadDot.opacity < 200) {
@@ -2004,8 +2013,9 @@ export default class GnomeSpeaksExtension extends Extension {
             }
         }
 
-        // Waveform bars: shift buffer and update heights
-        if (this._waveformContainer && this._waveformBars.length > 0) {
+        // Waveform bars: shift buffer and update heights (respects toggle)
+        if (this._waveformContainer && this._waveformBars.length > 0
+            && this._getConfigFlag('show_waveform', true)) {
             // Show waveform when audio arrives — reposition every frame
             // to track badge width changes (pills expanding/collapsing)
             this._positionWaveform();
@@ -2023,9 +2033,9 @@ export default class GnomeSpeaksExtension extends Extension {
             if (clampedLevel > 0.02)
                 this._lastSpeechTime = now;
 
-            // Silence fade: dim the waveform over 10s of silence (matches patience timeout feel)
+            // Silence fade: dim the waveform over 10s of silence
             let silenceMs = this._lastSpeechTime ? (now - this._lastSpeechTime) / 1000 : 0;
-            let fadeFactor = silenceMs > 2000
+            let fadeFactor = (this._getConfigFlag('show_silence_fade', true) && silenceMs > 2000)
                 ? Math.max(0.15, 1.0 - (silenceMs - 2000) / 10000)
                 : 1.0;
 

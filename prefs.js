@@ -785,6 +785,30 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
             'Show real-time transcription text',
             'live_subtitles', true);
 
+        this._addSwitchRow(visualGroup, 'Waveform Bars',
+            'Show audio level waveform below badge',
+            'show_waveform', true);
+
+        this._addSwitchRow(visualGroup, 'VAD Indicator',
+            'Show green dot when speech is detected',
+            'show_vad_dot', true);
+
+        this._addSwitchRow(visualGroup, 'Silence Fade',
+            'Waveform dims during extended silence',
+            'show_silence_fade', true);
+
+        this._addSwitchRow(visualGroup, 'Badge Pulse',
+            'Breathing animation when listening or speaking',
+            'show_badge_pulse', true);
+
+        this._addSwitchRow(visualGroup, 'Badge Audio Scale',
+            'Badge grows with voice volume',
+            'show_badge_scale', true);
+
+        this._addSwitchRow(visualGroup, 'Word Highlights',
+            'New words flash blue in subtitles',
+            'show_word_highlights', true);
+
         this._addSwitchRow(visualGroup, 'VU Meter',
             'Show volume meter animation during audio',
             'vu_meter', true);

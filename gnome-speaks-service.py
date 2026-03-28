@@ -222,6 +222,10 @@ INTROSPECTION_XML = """
     <signal name="AudioLevel">
       <arg type="d" name="level"/>
     </signal>
+    <signal name="STTStatus">
+      <arg type="b" name="speech_detected"/>
+      <arg type="d" name="timeout_fraction"/>
+    </signal>
     <signal name="Error">
       <arg type="s" name="message"/>
     </signal>
@@ -742,6 +746,15 @@ class GnomeSpeaksService:
             )
         return False
 
+    def _emit_stt_status(self, speech_detected, timeout_fraction):
+        if self._connection is not None:
+            self._connection.emit_signal(
+                None, OBJECT_PATH, INTERFACE_NAME,
+                "STTStatus",
+                GLib.Variant("(bd)", (speech_detected, timeout_fraction)),
+            )
+        return False
+
     def _emit_error(self, message):
         log.error("Error signal: %s", message)
         if self._connection is not None:
@@ -1090,9 +1103,20 @@ class GnomeSpeaksService:
                         # Emit audio level for badge visualization (~90ms interval).
                         # In loop idle (no speech yet), throttle to every 27 frames
                         # (~270ms) to reduce D-Bus traffic while waiting.
-                        emit_interval = 9 if speech_frames > 0 else 27
+                        emit_interval = 3 if speech_frames > 0 else 9
                         if total_frames % emit_interval == 0:
                             GLib.idle_add(self._emit_audio_level, min(energy / 10000.0, 1.0))
+                            # STT status: VAD state + timeout progress
+                            if speech_frames > 0:
+                                # During speech: show silence countdown
+                                tf = silence_frames / max_silence if max_silence > 0 else 0
+                            else:
+                                # Waiting for speech: show no-speech countdown
+                                tf = total_frames / max_no_speech if max_no_speech > 0 else 0
+                            # Also treat high energy as "speech" for visual feedback
+                            # even if VAD hasn't confirmed — gives instant response
+                            visual_speech = is_speech or (energy / 10000.0) > 0.15
+                            GLib.idle_add(self._emit_stt_status, visual_speech, min(tf, 1.0))
 
                         if _end_word_event.is_set():
                             _log(f"STOP: end word '{end_word}' detected. speech={speech_frames}")

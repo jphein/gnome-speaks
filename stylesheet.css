@@ -38,24 +38,65 @@
  * WAVEFORM BARS — audio-reactive visualization below badge
  * ============================================================ */
 
+.gnome-speaks-waveform-wrapper {
+    spacing: 0px;
+}
+
 .gnome-speaks-waveform {
-    spacing: 3px;
+    spacing: 1px;
+    height: 48px;
 }
 
 .gnome-speaks-waveform-bar {
-    width: 4px;
-    min-height: 3px;
+    min-width: 2px;
+    min-height: 2px;
     border-radius: 2px;
-    background-color: rgba(120, 180, 255, 0.7);
+    background-color: rgba(100, 100, 120, 0.4);
     transition-duration: 0ms;
 }
 
-.gnome-speaks-waveform-bar-listening {
-    background-color: rgba(80, 160, 255, 0.85);
+/* Three-color level metering */
+.gnome-speaks-waveform-bar-good {
+    background-color: rgba(80, 220, 120, 0.85);
 }
 
-.gnome-speaks-waveform-bar-speaking {
-    background-color: rgba(170, 100, 255, 0.85);
+.gnome-speaks-waveform-bar-hot {
+    background-color: rgba(255, 200, 50, 0.9);
+}
+
+.gnome-speaks-waveform-bar-clip {
+    background-color: rgba(255, 70, 70, 0.95);
+}
+
+/* VAD active — vivid glow when speech detected */
+.gnome-speaks-vad-active {
+    border: 2px solid rgba(80, 255, 140, 0.9);
+    box-shadow: 0 0 24px rgba(80, 255, 140, 0.6), 0 0 48px rgba(80, 255, 140, 0.25);
+    background-color: rgba(30, 130, 250, 0.95);
+}
+
+.gnome-speaks-vad-active StIcon {
+    color: rgba(140, 255, 180, 1.0);
+}
+
+.gnome-speaks-vad-active StLabel {
+    color: rgba(200, 255, 220, 1.0);
+}
+
+/* Timeout countdown bar */
+.gnome-speaks-timeout-bar {
+    background-color: rgba(80, 220, 120, 0.6);
+    border-radius: 1px;
+    height: 3px;
+    transition-duration: 0ms;
+}
+
+.gnome-speaks-timeout-warn {
+    background-color: rgba(255, 200, 50, 0.8);
+}
+
+.gnome-speaks-timeout-urgent {
+    background-color: rgba(255, 70, 70, 0.9);
 }
 
 /* ============================================================

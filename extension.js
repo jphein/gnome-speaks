@@ -112,6 +112,10 @@ const DBUS_XML = `
     <signal name="AudioLevel">
       <arg type="d" name="level"/>
     </signal>
+    <signal name="STTStatus">
+      <arg type="b" name="speech_detected"/>
+      <arg type="d" name="timeout_fraction"/>
+    </signal>
     <signal name="Error">
       <arg type="s" name="message"/>
     </signal>
@@ -199,6 +203,7 @@ export default class GnomeSpeaksExtension extends Extension {
         this._previousWords = [];
         this._wordHighlights = [];
         this._pendingPartialMarkup = null;
+        this._lastVadTime = 0;
         this._settings = this.getSettings();
 
         // Restore persisted badge position
@@ -520,25 +525,60 @@ export default class GnomeSpeaksExtension extends Extension {
         });
         this._signals.push({obj: this._badge, id: releaseId});
 
-        // Waveform bars — audio-reactive visualization below badge
-        this._waveformBars = [];
-        this._waveformLevels = new Array(9).fill(0);
+        // Waveform + timeout — vertical stack below badge
+        this._waveformLevels = new Array(32).fill(0);
         this._waveformContainer = new St.BoxLayout({
-            style_class: 'gnome-speaks-waveform',
+            style_class: 'gnome-speaks-waveform-wrapper',
             reactive: false,
             can_focus: false,
-            vertical: false,
+            vertical: true,
             opacity: 0,
         });
-        for (let i = 0; i < 9; i++) {
-            let bar = new St.Bin({
+
+        // Mirrored bar rows — top grows down, bottom grows up
+        this._waveformBars = [];
+        this._waveformBarsTop = [];
+        this._waveformRowTop = new St.BoxLayout({
+            style_class: 'gnome-speaks-waveform',
+            vertical: false,
+            y_align: Clutter.ActorAlign.END, // bars grow downward from bottom of top row
+        });
+        this._waveformRowTop.set_height(24);
+        this._waveformRow = new St.BoxLayout({
+            style_class: 'gnome-speaks-waveform',
+            vertical: false,
+            y_align: Clutter.ActorAlign.START, // bars grow upward from top of bottom row
+        });
+        this._waveformRow.set_height(24);
+        for (let i = 0; i < 32; i++) {
+            let barTop = new St.Bin({
                 style_class: 'gnome-speaks-waveform-bar',
                 reactive: false,
+                y_align: Clutter.ActorAlign.END,
+                x_expand: true,
             });
-            bar.set_pivot_point(0.5, 1.0); // anchor bottom so bars grow upward
-            this._waveformBars.push(bar);
-            this._waveformContainer.add_child(bar);
+            let barBot = new St.Bin({
+                style_class: 'gnome-speaks-waveform-bar',
+                reactive: false,
+                y_align: Clutter.ActorAlign.START,
+                x_expand: true,
+            });
+            this._waveformBarsTop.push(barTop);
+            this._waveformBars.push(barBot);
+            this._waveformRowTop.add_child(barTop);
+            this._waveformRow.add_child(barBot);
         }
+        this._waveformContainer.add_child(this._waveformRowTop);
+        this._waveformContainer.add_child(this._waveformRow);
+
+        // Timeout progress bar
+        this._timeoutBar = new St.Bin({
+            style_class: 'gnome-speaks-timeout-bar',
+            reactive: false,
+            height: 3,
+        });
+        this._waveformContainer.add_child(this._timeoutBar);
+
         Main.uiGroup.add_child(this._waveformContainer);
 
         Main.layoutManager.addTopChrome(this._badge, {
@@ -932,7 +972,11 @@ export default class GnomeSpeaksExtension extends Extension {
             Main.uiGroup.remove_child(this._waveformContainer);
             this._waveformContainer.destroy();
             this._waveformContainer = null;
+            this._waveformRow = null;
+            this._waveformRowTop = null;
             this._waveformBars = [];
+            this._waveformBarsTop = [];
+            this._timeoutBar = null;
         }
 
         if (this._badge) {
@@ -1188,11 +1232,12 @@ export default class GnomeSpeaksExtension extends Extension {
     _positionWaveform() {
         if (!this._waveformContainer || !this._badge) return;
         let badge = this._badge;
-        let barCount = this._waveformBars.length;
-        let totalWidth = barCount * 4 + (barCount - 1) * 3; // 4px bars + 3px gaps
+        // Match the badge's current width exactly (pills expand it dynamically)
+        let waveWidth = badge.width;
+        this._waveformContainer.set_width(waveWidth);
         this._waveformContainer.set_position(
-            badge.x + badge.width / 2 - totalWidth / 2,
-            badge.y + badge.height + 6
+            badge.x,
+            badge.y + badge.height + 4
         );
     }
 
@@ -1280,6 +1325,12 @@ export default class GnomeSpeaksExtension extends Extension {
             this._onAudioLevel(level);
         });
         this._proxySignals.push(audioLevelId);
+
+        let sttStatusId = this._proxy.connectSignal('STTStatus', (proxy, sender, [speechDetected, timeoutFraction]) => {
+            if (this._destroyed) return;
+            this._onSTTStatus(speechDetected, timeoutFraction);
+        });
+        this._proxySignals.push(sttStatusId);
 
         let errorId = this._proxy.connectSignal('Error', (proxy, sender, [message]) => {
             if (this._destroyed) return;
@@ -1477,6 +1528,10 @@ export default class GnomeSpeaksExtension extends Extension {
             this._wordHighlights = [];
             this._cancelTimeout('word-highlight-fade');
         }
+
+        // Clear VAD indicator
+        if (newState !== States.LISTENING && this._badge)
+            this._badge.remove_style_class_name('gnome-speaks-vad-active');
 
         // Fade waveform when leaving active states
         if (newState === States.IDLE && this._waveformContainer) {
@@ -1842,6 +1897,35 @@ export default class GnomeSpeaksExtension extends Extension {
         this._trackTimeout(timeoutId, 'error');
     }
 
+    // -- STT status: VAD indicator + timeout progress ----------------------
+
+    _onSTTStatus(speechDetected, timeoutFraction) {
+        if (this._destroyed || !this._badge) return;
+        if (this._state !== States.LISTENING) return;
+
+        // VAD: toggle style class on badge for speech-detected glow
+        if (speechDetected && !this._badge.has_style_class_name('gnome-speaks-vad-active')) {
+            this._badge.add_style_class_name('gnome-speaks-vad-active');
+        } else if (!speechDetected && this._badge.has_style_class_name('gnome-speaks-vad-active')) {
+            this._badge.remove_style_class_name('gnome-speaks-vad-active');
+        }
+
+        // Timeout progress bar
+        if (this._timeoutBar) {
+            // Width = fraction of container width (shrinks as timeout approaches)
+            let remaining = 1.0 - timeoutFraction;
+            let parentWidth = this._timeoutBar.get_parent() ? this._timeoutBar.get_parent().width : 140;
+            this._timeoutBar.set_width(Math.max(0, Math.floor(remaining * parentWidth)));
+            // Color: green when plenty of time, amber < 30%, red < 10%
+            this._timeoutBar.remove_style_class_name('gnome-speaks-timeout-warn');
+            this._timeoutBar.remove_style_class_name('gnome-speaks-timeout-urgent');
+            if (remaining < 0.1)
+                this._timeoutBar.add_style_class_name('gnome-speaks-timeout-urgent');
+            else if (remaining < 0.3)
+                this._timeoutBar.add_style_class_name('gnome-speaks-timeout-warn');
+        }
+    }
+
     // -- Audio level visualization -----------------------------------------
 
     _onAudioLevel(level) {
@@ -1874,9 +1958,23 @@ export default class GnomeSpeaksExtension extends Extension {
         let scale = 1.0 + clampedLevel * 0.08;
         this._badge.set_scale(scale, scale);
 
+        // VAD indicator — show green glow when audio level indicates speech.
+        // Sticky: stays active for 400ms after last speech-level audio to
+        // prevent flickering from brief inter-syllable silence.
+        if (clampedLevel > 0.06) {
+            this._lastVadTime = now;
+            if (!this._badge.has_style_class_name('gnome-speaks-vad-active'))
+                this._badge.add_style_class_name('gnome-speaks-vad-active');
+        } else if (this._lastVadTime && (now - this._lastVadTime) > 400000) {
+            if (this._badge.has_style_class_name('gnome-speaks-vad-active'))
+                this._badge.remove_style_class_name('gnome-speaks-vad-active');
+        }
+
         // Waveform bars: shift buffer and update heights
         if (this._waveformContainer && this._waveformBars.length > 0) {
-            // Show waveform when audio arrives
+            // Show waveform when audio arrives — reposition every frame
+            // to track badge width changes (pills expanding/collapsing)
+            this._positionWaveform();
             if (this._waveformContainer.opacity === 0) {
                 this._waveformContainer.show();
                 this._waveformContainer.ease({
@@ -1887,10 +1985,25 @@ export default class GnomeSpeaksExtension extends Extension {
             // Shift levels left, add new sample at end
             this._waveformLevels.shift();
             this._waveformLevels.push(clampedLevel);
-            // Set bar heights (max 24px)
+            // Set bar heights (mirrored top + bottom) with log scaling + color
             for (let i = 0; i < this._waveformBars.length; i++) {
-                let h = Math.max(3, Math.floor(this._waveformLevels[i] * 24));
-                this._waveformBars[i].set_height(h);
+                let lvl = this._waveformLevels[i];
+                let logLevel = Math.log(1 + lvl * 20) / Math.log(21);
+                let h = Math.max(2, Math.floor(logLevel * 22));
+                let barBot = this._waveformBars[i];
+                let barTop = this._waveformBarsTop[i];
+                barBot.set_height(h);
+                barTop.set_height(h);
+                // Three-color: green (good), amber (hot), red (clipped)
+                let colorClass = lvl > 0.8 ? 'gnome-speaks-waveform-bar-clip'
+                    : lvl > 0.35 ? 'gnome-speaks-waveform-bar-hot'
+                    : lvl > 0.02 ? 'gnome-speaks-waveform-bar-good' : null;
+                for (let bar of [barBot, barTop]) {
+                    bar.remove_style_class_name('gnome-speaks-waveform-bar-good');
+                    bar.remove_style_class_name('gnome-speaks-waveform-bar-hot');
+                    bar.remove_style_class_name('gnome-speaks-waveform-bar-clip');
+                    if (colorClass) bar.add_style_class_name(colorClass);
+                }
             }
         }
 

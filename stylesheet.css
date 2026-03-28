@@ -68,36 +68,18 @@
     background-color: rgba(255, 70, 70, 0.95);
 }
 
-/* VAD active — vivid glow when speech detected */
-.gnome-speaks-vad-active {
-    border: 2px solid rgba(80, 255, 140, 0.9);
-    box-shadow: 0 0 24px rgba(80, 255, 140, 0.6), 0 0 48px rgba(80, 255, 140, 0.25);
-    background-color: rgba(30, 130, 250, 0.95);
+/* Silence fade — bars dim to gray when no speech for a while */
+.gnome-speaks-waveform-bar-dim {
+    background-color: rgba(140, 140, 160, 0.35);
 }
 
-.gnome-speaks-vad-active StIcon {
-    color: rgba(140, 255, 180, 1.0);
+/* VAD dot — glowing green circle next to badge when speech detected */
+.gnome-speaks-vad-dot {
+    border-radius: 999px;
+    background-color: rgba(60, 255, 120, 1.0);
+    box-shadow: 0 0 16px rgba(60, 255, 120, 0.8), 0 0 32px rgba(60, 255, 120, 0.4);
 }
 
-.gnome-speaks-vad-active StLabel {
-    color: rgba(200, 255, 220, 1.0);
-}
-
-/* Timeout countdown bar */
-.gnome-speaks-timeout-bar {
-    background-color: rgba(80, 220, 120, 0.6);
-    border-radius: 1px;
-    height: 3px;
-    transition-duration: 0ms;
-}
-
-.gnome-speaks-timeout-warn {
-    background-color: rgba(255, 200, 50, 0.8);
-}
-
-.gnome-speaks-timeout-urgent {
-    background-color: rgba(255, 70, 70, 0.9);
-}
 
 /* ============================================================
  * HOVER

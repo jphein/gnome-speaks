@@ -391,9 +391,10 @@ def _type_raw(text):
         return
     if _TYPING_TOOL == "ydotool":
         if _YDOTOOL_V1:
-            # v1.0+: pipe text via stdin to avoid argument-parsing space issues
+            # v1.0+: pipe text via stdin to avoid argument-parsing space issues.
+            # 3ms key delay prevents terminal input buffer drops (especially spaces).
             _run_ydotool(
-                ["ydotool", "type", "-d", "1", "--file", "-"],
+                ["ydotool", "type", "-d", "3", "--file", "-"],
                 input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10,
             )
@@ -460,7 +461,8 @@ def replace_typed_text(old_text, new_text):
     """Update live-typed text. Append-only when possible to avoid visual flicker.
 
     If new_text is an extension of old_text, just type the new suffix (fast, smooth).
-    If it's a revision, erase and paste via clipboard (atomic, reliable).
+    If it's a revision, only backspace the changed tail — find the common prefix
+    and only delete/retype from where the texts diverge.
     """
     if _TYPING_TOOL not in ("ydotool", "xdotool"):
         return  # clipboard mode can't do live partials
@@ -472,11 +474,19 @@ def replace_typed_text(old_text, new_text):
         if suffix:
             _type_raw(suffix)
     else:
-        # Hypothesis revised earlier text — erase and paste via clipboard
-        if old_text:
-            _send_backspaces(len(old_text))
+        # Hypothesis revised — find common prefix, only backspace the changed tail.
+        # This minimizes visual disruption (e.g., "hello how our" → "hello how are"
+        # only backspaces 3 chars and types 3, not the full 13+13).
+        common = 0
+        while common < len(old_text) and common < len(new_text) and old_text[common] == new_text[common]:
+            common += 1
+        chars_to_delete = len(old_text) - common
+        new_suffix = new_text[common:]
+        if chars_to_delete > 0:
+            _send_backspaces(chars_to_delete)
             time.sleep(0.01)
-        _clipboard_paste(new_text)
+        if new_suffix:
+            _type_raw(new_suffix)
 
 
 def selection_read():

@@ -571,15 +571,21 @@ export default class GnomeSpeaksExtension extends Extension {
         this._waveformContainer.add_child(this._waveformRowTop);
         this._waveformContainer.add_child(this._waveformRow);
 
-        // Timeout progress bar
-        this._timeoutBar = new St.Bin({
-            style_class: 'gnome-speaks-timeout-bar',
-            reactive: false,
-            height: 3,
-        });
-        this._waveformContainer.add_child(this._timeoutBar);
+        // Silence fade: waveform dims over time when no speech
+        this._lastSpeechTime = 0;
+        this._silenceFadeActive = false;
 
         Main.uiGroup.add_child(this._waveformContainer);
+
+        // VAD indicator — glowing green dot to the right of the badge
+        this._vadDot = new St.Bin({
+            style_class: 'gnome-speaks-vad-dot',
+            reactive: false,
+            width: 12,
+            height: 12,
+            opacity: 0,
+        });
+        Main.uiGroup.add_child(this._vadDot);
 
         Main.layoutManager.addTopChrome(this._badge, {
             affectsInputRegion: true,
@@ -779,19 +785,32 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
 
         let badge = this._badge;
-        let monitor = Main.layoutManager.primaryMonitor;
+
+        // Find which monitor the badge is on (not always primaryMonitor)
+        let badgeCenterX = badge.x + badge.width / 2;
+        let badgeCenterY = badge.y + badge.height / 2;
+        let monitor = null;
+        for (let i = 0; i < Main.layoutManager.monitors.length; i++) {
+            let m = Main.layoutManager.monitors[i];
+            if (badgeCenterX >= m.x && badgeCenterX < m.x + m.width &&
+                badgeCenterY >= m.y && badgeCenterY < m.y + m.height) {
+                monitor = m;
+                break;
+            }
+        }
+        if (!monitor)
+            monitor = Main.layoutManager.primaryMonitor;
         if (!monitor)
             return;
 
         let overlayWidth = Math.min(600, monitor.width - 80);
         this._subtitleOverlay.set_style(`max-width: ${overlayWidth}px; min-width: 200px;`);
 
-        // Show above or below badge depending on screen position
-        let badgeCenterY = badge.y + badge.height / 2;
+        // Show above or below badge depending on position within THIS monitor
         let screenMidY = monitor.y + monitor.height / 2;
         let showAbove = badgeCenterY > screenMidY;
 
-        // Horizontal: center on badge, clamp to screen edges
+        // Horizontal: center on badge, clamp to THIS monitor's edges
         let overlayX = badge.x + badge.width / 2 - overlayWidth / 2;
         overlayX = Math.max(monitor.x + 20, Math.min(overlayX, monitor.x + monitor.width - overlayWidth - 20));
 
@@ -967,6 +986,13 @@ export default class GnomeSpeaksExtension extends Extension {
 
         this._destroyContextMenu();
 
+        if (this._vadDot) {
+            this._vadDot.remove_all_transitions();
+            Main.uiGroup.remove_child(this._vadDot);
+            this._vadDot.destroy();
+            this._vadDot = null;
+        }
+
         if (this._waveformContainer) {
             this._waveformContainer.remove_all_transitions();
             Main.uiGroup.remove_child(this._waveformContainer);
@@ -976,7 +1002,6 @@ export default class GnomeSpeaksExtension extends Extension {
             this._waveformRowTop = null;
             this._waveformBars = [];
             this._waveformBarsTop = [];
-            this._timeoutBar = null;
         }
 
         if (this._badge) {
@@ -1232,13 +1257,19 @@ export default class GnomeSpeaksExtension extends Extension {
     _positionWaveform() {
         if (!this._waveformContainer || !this._badge) return;
         let badge = this._badge;
-        // Match the badge's current width exactly (pills expand it dynamically)
         let waveWidth = badge.width;
         this._waveformContainer.set_width(waveWidth);
         this._waveformContainer.set_position(
             badge.x,
             badge.y + badge.height + 4
         );
+        // VAD dot: right side of badge, vertically centered
+        if (this._vadDot) {
+            this._vadDot.set_position(
+                badge.x + badge.width + 8,
+                badge.y + badge.height / 2 - 6
+            );
+        }
     }
 
     _connectLayoutSignals() {
@@ -1529,9 +1560,11 @@ export default class GnomeSpeaksExtension extends Extension {
             this._cancelTimeout('word-highlight-fade');
         }
 
-        // Clear VAD indicator
-        if (newState !== States.LISTENING && this._badge)
-            this._badge.remove_style_class_name('gnome-speaks-vad-active');
+        // Hide VAD dot when leaving listening
+        if (newState !== States.LISTENING && this._vadDot) {
+            this._vadDot.remove_all_transitions();
+            this._vadDot.opacity = 0;
+        }
 
         // Fade waveform when leaving active states
         if (newState === States.IDLE && this._waveformContainer) {
@@ -1769,6 +1802,9 @@ export default class GnomeSpeaksExtension extends Extension {
             return;
         if (this._state !== States.LISTENING && this._state !== States.SPEAKING)
             return;
+        // In dictation mode (not AI), text is typed at cursor — subtitles are redundant
+        if (!this._conversationMode)
+            return;
 
         if (text === this._lastPartialText)
             return;
@@ -1871,6 +1907,10 @@ export default class GnomeSpeaksExtension extends Extension {
         this._wordHighlights = [];
         this._cancelTimeout('word-highlight-fade');
 
+        // In dictation mode, text is already at cursor — skip subtitle
+        if (!this._conversationMode)
+            return;
+
         // Show in the subtitle overlay — final, non-italic style
         this._showSubtitle(text, false);
 
@@ -1910,20 +1950,7 @@ export default class GnomeSpeaksExtension extends Extension {
             this._badge.remove_style_class_name('gnome-speaks-vad-active');
         }
 
-        // Timeout progress bar
-        if (this._timeoutBar) {
-            // Width = fraction of container width (shrinks as timeout approaches)
-            let remaining = 1.0 - timeoutFraction;
-            let parentWidth = this._timeoutBar.get_parent() ? this._timeoutBar.get_parent().width : 140;
-            this._timeoutBar.set_width(Math.max(0, Math.floor(remaining * parentWidth)));
-            // Color: green when plenty of time, amber < 30%, red < 10%
-            this._timeoutBar.remove_style_class_name('gnome-speaks-timeout-warn');
-            this._timeoutBar.remove_style_class_name('gnome-speaks-timeout-urgent');
-            if (remaining < 0.1)
-                this._timeoutBar.add_style_class_name('gnome-speaks-timeout-urgent');
-            else if (remaining < 0.3)
-                this._timeoutBar.add_style_class_name('gnome-speaks-timeout-warn');
-        }
+        // (Timeout visualization now handled by waveform fade in _onAudioLevel)
     }
 
     // -- Audio level visualization -----------------------------------------
@@ -1958,16 +1985,23 @@ export default class GnomeSpeaksExtension extends Extension {
         let scale = 1.0 + clampedLevel * 0.08;
         this._badge.set_scale(scale, scale);
 
-        // VAD indicator — show green glow when audio level indicates speech.
-        // Sticky: stays active for 400ms after last speech-level audio to
-        // prevent flickering from brief inter-syllable silence.
-        if (clampedLevel > 0.06) {
-            this._lastVadTime = now;
-            if (!this._badge.has_style_class_name('gnome-speaks-vad-active'))
-                this._badge.add_style_class_name('gnome-speaks-vad-active');
-        } else if (this._lastVadTime && (now - this._lastVadTime) > 400000) {
-            if (this._badge.has_style_class_name('gnome-speaks-vad-active'))
-                this._badge.remove_style_class_name('gnome-speaks-vad-active');
+        // VAD indicator — separate glowing dot, appears when any speech-level audio.
+        // Sticky 1s hold so it stays visible through natural pauses.
+        if (this._vadDot) {
+            if (clampedLevel > 0.02) {
+                this._lastVadTime = now;
+                if (this._vadDot.opacity < 200) {
+                    this._vadDot.remove_all_transitions();
+                    this._vadDot.opacity = 255;
+                }
+            } else if (this._lastVadTime && (now - this._lastVadTime) > 1000000) {
+                if (this._vadDot.opacity > 0) {
+                    this._vadDot.ease({
+                        opacity: 0, duration: 500,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    });
+                }
+            }
         }
 
         // Waveform bars: shift buffer and update heights
@@ -1985,23 +2019,40 @@ export default class GnomeSpeaksExtension extends Extension {
             // Shift levels left, add new sample at end
             this._waveformLevels.shift();
             this._waveformLevels.push(clampedLevel);
+            // Track last speech-level audio for silence fade
+            if (clampedLevel > 0.02)
+                this._lastSpeechTime = now;
+
+            // Silence fade: dim the waveform over 10s of silence (matches patience timeout feel)
+            let silenceMs = this._lastSpeechTime ? (now - this._lastSpeechTime) / 1000 : 0;
+            let fadeFactor = silenceMs > 2000
+                ? Math.max(0.15, 1.0 - (silenceMs - 2000) / 10000)
+                : 1.0;
+
             // Set bar heights (mirrored top + bottom) with log scaling + color
             for (let i = 0; i < this._waveformBars.length; i++) {
                 let lvl = this._waveformLevels[i];
                 let logLevel = Math.log(1 + lvl * 20) / Math.log(21);
-                let h = Math.max(2, Math.floor(logLevel * 22));
+                let h = Math.max(2, Math.floor(logLevel * 22 * fadeFactor));
                 let barBot = this._waveformBars[i];
                 let barTop = this._waveformBarsTop[i];
                 barBot.set_height(h);
                 barTop.set_height(h);
                 // Three-color: green (good), amber (hot), red (clipped)
-                let colorClass = lvl > 0.8 ? 'gnome-speaks-waveform-bar-clip'
-                    : lvl > 0.35 ? 'gnome-speaks-waveform-bar-hot'
-                    : lvl > 0.02 ? 'gnome-speaks-waveform-bar-good' : null;
+                // When fading, shift to dim gray
+                let colorClass;
+                if (fadeFactor < 0.5) {
+                    colorClass = lvl > 0.02 ? 'gnome-speaks-waveform-bar-dim' : null;
+                } else {
+                    colorClass = lvl > 0.8 ? 'gnome-speaks-waveform-bar-clip'
+                        : lvl > 0.35 ? 'gnome-speaks-waveform-bar-hot'
+                        : lvl > 0.02 ? 'gnome-speaks-waveform-bar-good' : null;
+                }
                 for (let bar of [barBot, barTop]) {
                     bar.remove_style_class_name('gnome-speaks-waveform-bar-good');
                     bar.remove_style_class_name('gnome-speaks-waveform-bar-hot');
                     bar.remove_style_class_name('gnome-speaks-waveform-bar-clip');
+                    bar.remove_style_class_name('gnome-speaks-waveform-bar-dim');
                     if (colorClass) bar.add_style_class_name(colorClass);
                 }
             }

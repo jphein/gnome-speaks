@@ -199,6 +199,10 @@ INTROSPECTION_XML = """
     <method name="GetSTTModes">
       <arg direction="out" type="s" name="modes"/>
     </method>
+    <method name="PlaySound">
+      <arg direction="in" type="s" name="sound_name"/>
+      <arg direction="out" type="b" name="success"/>
+    </method>
     <method name="Stop">
       <arg direction="out" type="b" name="success"/>
     </method>
@@ -1547,6 +1551,29 @@ class GnomeSpeaksService:
             return False
         return self.speak(text)
 
+    # -- PlaySound (non-blocking chime playback) ----------------------------
+
+    def play_sound(self, sound_name):
+        """Play a realm sound chime by name via ~/.realmwatch/sounds/play.sh.
+
+        Supported names: quest_complete, level_up, xp_gain, threat_alert
+        Non-blocking — fires and forgets.
+        """
+        import subprocess
+        import os
+        script = os.path.expanduser("~/.realmwatch/sounds/play.sh")
+        if not os.path.isfile(script):
+            log.warning("Sound script not found: %s", script)
+            return False
+        try:
+            subprocess.Popen([script, sound_name],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return True
+        except Exception as e:
+            log.exception("PlaySound failed for %s: %s", sound_name, e)
+            return False
+
     # -- Talk (full-duplex TTS+STT) ----------------------------------------
 
     def talk(self, text):
@@ -2513,6 +2540,11 @@ class DBusHandler:
             elif method_name == "GetSTTModes":
                 result = self.service.get_stt_modes()
                 invocation.return_value(GLib.Variant("(s)", (result,)))
+
+            elif method_name == "PlaySound":
+                sound_name = parameters.unpack()[0]
+                result = self.service.play_sound(sound_name)
+                invocation.return_value(GLib.Variant("(b)", (result,)))
 
             elif method_name == "Stop":
                 self._run_async(invocation, "(b)", self.service.stop)

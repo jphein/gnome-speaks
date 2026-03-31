@@ -38,16 +38,6 @@
       </description>
     </key>
 
-    <key name="auto-stop-silence-seconds" type="i">
-      <default>3</default>
-      <range min="1" max="10"/>
-      <summary>Auto-stop after silence (seconds)</summary>
-      <description>
-        Number of seconds of silence before the microphone automatically
-        stops listening. Must be between 1 and 10.
-      </description>
-    </key>
-
     <!-- Keyboard shortcuts -->
 
     <key name="toggle-listening-shortcut" type="as">
@@ -74,14 +64,6 @@
       <description>
         Whether to display a subtitle overlay at the bottom of the screen
         showing live speech transcription and TTS text.
-      </description>
-    </key>
-
-    <key name="subtitle-color" type="s">
-      <default>'cream'</default>
-      <summary>Subtitle text color</summary>
-      <description>
-        Color scheme for subtitle text. Options: cream, gold, green, amber, cyan.
       </description>
     </key>
 

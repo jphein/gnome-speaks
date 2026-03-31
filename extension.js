@@ -765,6 +765,12 @@ export default class GnomeSpeaksExtension extends Extension {
                 this._applySubtitleColor();
             });
             this._signals.push({obj: this._settings, id: colorChangedId});
+
+            let subtitleToggleId = this._settings.connect('changed::live-subtitles', () => {
+                if (!this._settings.get_boolean('live-subtitles'))
+                    this._hideSubtitle(true);
+            });
+            this._signals.push({obj: this._settings, id: subtitleToggleId});
         }
     }
 

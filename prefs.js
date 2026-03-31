@@ -781,9 +781,9 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(visualGroup);
 
-        this._addSwitchRow(visualGroup, 'Live Subtitles',
+        this._addGSettingsSwitchRow(visualGroup, 'Live Subtitles',
             'Show real-time transcription text',
-            'live_subtitles', true);
+            'live-subtitles');
 
         this._addSwitchRow(visualGroup, 'Waveform Bars',
             'Show audio level waveform below badge',

@@ -747,9 +747,6 @@ export default class GnomeSpeaksExtension extends Extension {
 
         this._subtitleOverlay.add_child(this._subtitleLabel);
 
-        // Apply color variant from settings
-        this._applySubtitleColor();
-
         // Start hidden
         this._subtitleOverlay.opacity = 0;
         this._subtitleOverlay.hide();
@@ -761,11 +758,6 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Listen for settings changes
         if (this._settings) {
-            let colorChangedId = this._settings.connect('changed::subtitle-color', () => {
-                this._applySubtitleColor();
-            });
-            this._signals.push({obj: this._settings, id: colorChangedId});
-
             let subtitleToggleId = this._settings.connect('changed::live-subtitles', () => {
                 if (!this._settings.get_boolean('live-subtitles'))
                     this._hideSubtitle(true);
@@ -775,16 +767,24 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _applySubtitleColor() {
-        if (!this._subtitleOverlay || !this._settings)
+        if (!this._subtitleOverlay)
             return;
 
         // Remove existing color classes
-        let colors = ['cream', 'gold', 'green', 'amber', 'cyan'];
+        let colors = ['cream', 'gold', 'green', 'light_green', 'yellow', 'amber',
+            'rust', 'red', 'light_red', 'blue', 'light_blue', 'cyan', 'light_cyan',
+            'magenta', 'light_magenta', 'white', 'gray'];
         for (let c of colors)
             this._subtitleOverlay.remove_style_class_name(`gnome-speaks-subtitle-${c}`);
 
-        let color = this._settings.get_string('subtitle-color');
-        if (color && color !== 'cream')
+        // Pick color based on current state: user speech vs TTS
+        let color;
+        if (this._state === States.SPEAKING)
+            color = this._getConfigFlag('subtitle_color_tts', 'amber');
+        else
+            color = this._getConfigFlag('subtitle_color_user', 'light_green');
+
+        if (color && color !== 'default')
             this._subtitleOverlay.add_style_class_name(`gnome-speaks-subtitle-${color}`);
     }
 
@@ -844,6 +844,9 @@ export default class GnomeSpeaksExtension extends Extension {
 
         if (!this._subtitleOverlay || !this._subtitleLabel)
             return;
+
+        // Apply per-state color (user speech vs TTS)
+        this._applySubtitleColor();
 
         if (useMarkup) {
             // Pango markup mode — text is pre-formatted with word highlights

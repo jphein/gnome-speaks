@@ -371,22 +371,70 @@
     text-align: center;
 }
 
-/* -- Color variants for subtitle_color setting -- */
-
-.gnome-speaks-subtitle-gold .gnome-speaks-subtitle-text {
-    color: #d4a574;
-}
+/* -- Color variants for subtitle color setting -- */
 
 .gnome-speaks-subtitle-green .gnome-speaks-subtitle-text {
     color: #6eb86e;
+}
+
+.gnome-speaks-subtitle-light_green .gnome-speaks-subtitle-text {
+    color: #a8d8a8;
+}
+
+.gnome-speaks-subtitle-yellow .gnome-speaks-subtitle-text {
+    color: #e8d44d;
 }
 
 .gnome-speaks-subtitle-amber .gnome-speaks-subtitle-text {
     color: #d4a574;
 }
 
+.gnome-speaks-subtitle-gold .gnome-speaks-subtitle-text {
+    color: #c8a848;
+}
+
+.gnome-speaks-subtitle-rust .gnome-speaks-subtitle-text {
+    color: #c87848;
+}
+
+.gnome-speaks-subtitle-red .gnome-speaks-subtitle-text {
+    color: #d46464;
+}
+
+.gnome-speaks-subtitle-light_red .gnome-speaks-subtitle-text {
+    color: #e8a0a0;
+}
+
+.gnome-speaks-subtitle-blue .gnome-speaks-subtitle-text {
+    color: #6488cc;
+}
+
+.gnome-speaks-subtitle-light_blue .gnome-speaks-subtitle-text {
+    color: #a0c0e8;
+}
+
 .gnome-speaks-subtitle-cyan .gnome-speaks-subtitle-text {
     color: #88ccdd;
+}
+
+.gnome-speaks-subtitle-light_cyan .gnome-speaks-subtitle-text {
+    color: #b0e0e8;
+}
+
+.gnome-speaks-subtitle-magenta .gnome-speaks-subtitle-text {
+    color: #cc6ecc;
+}
+
+.gnome-speaks-subtitle-light_magenta .gnome-speaks-subtitle-text {
+    color: #e0a8e0;
+}
+
+.gnome-speaks-subtitle-white .gnome-speaks-subtitle-text {
+    color: #f0f0f0;
+}
+
+.gnome-speaks-subtitle-gray .gnome-speaks-subtitle-text {
+    color: #a0a0a0;
 }
 
 /* -- Partial (live) vs final transcription styling -- */

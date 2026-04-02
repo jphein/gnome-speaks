@@ -781,9 +781,9 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         });
         page.add(visualGroup);
 
-        this._addSwitchRow(visualGroup, 'Live Subtitles',
+        this._addGSettingsSwitchRow(visualGroup, 'Live Subtitles',
             'Show real-time transcription text',
-            'live_subtitles', true);
+            'live-subtitles');
 
         this._addSwitchRow(visualGroup, 'Waveform Bars',
             'Show audio level waveform below badge',
@@ -881,16 +881,6 @@ export default class GnomeSpeaksPreferences extends ExtensionPreferences {
         this._addShortcutRow(shortcutGroup, 'Speak Clipboard', 'speak-clipboard-shortcut');
         this._addShortcutRow(shortcutGroup, 'Read Selection', 'read-selection-shortcut');
         this._addShortcutRow(shortcutGroup, 'Toggle Voice Quality', 'toggle-voice-quality-shortcut');
-
-        // ── Behavior ──
-        const behaviorGroup = new Adw.PreferencesGroup({
-            title: 'Behavior',
-        });
-        page.add(behaviorGroup);
-
-        this._addGSettingsSpinRow(behaviorGroup, 'Auto-stop Silence (s)',
-            'auto-stop-silence-seconds', 1, 10, 1, 0,
-            'Seconds of silence before auto-stop listening');
 
         window.add(page);
     }

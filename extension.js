@@ -713,13 +713,35 @@ export default class GnomeSpeaksExtension extends Extension {
     }
 
     _showPills(visible) {
-        if (!this._pills) return;
+        if (!this._pills || !this._badge) return;
+
+        // Capture badge center before width changes
+        let oldWidth = this._badge.get_width();
+        let centerX = this._badge.x + oldWidth / 2;
+
         for (let pill of this._pills) {
             if (visible)
                 pill.show();
             else
                 pill.hide();
         }
+
+        // Re-center badge after pills change width
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (this._destroyed || !this._badge)
+                return GLib.SOURCE_REMOVE;
+            let newWidth = this._badge.get_width();
+            if (newWidth !== oldWidth) {
+                let newX = Math.round(centerX - newWidth / 2);
+                this._badge.set_position(newX, this._badge.y);
+                // Update saved position so re-centering persists
+                if (this._customPosition)
+                    this._customPosition.x = newX;
+                this._positionWaveform();
+                this._positionSubtitleOverlay();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // -- Subtitle overlay --------------------------------------------------
@@ -747,9 +769,6 @@ export default class GnomeSpeaksExtension extends Extension {
 
         this._subtitleOverlay.add_child(this._subtitleLabel);
 
-        // Apply color variant from settings
-        this._applySubtitleColor();
-
         // Start hidden
         this._subtitleOverlay.opacity = 0;
         this._subtitleOverlay.hide();
@@ -761,24 +780,33 @@ export default class GnomeSpeaksExtension extends Extension {
 
         // Listen for settings changes
         if (this._settings) {
-            let colorChangedId = this._settings.connect('changed::subtitle-color', () => {
-                this._applySubtitleColor();
+            let subtitleToggleId = this._settings.connect('changed::live-subtitles', () => {
+                if (!this._settings.get_boolean('live-subtitles'))
+                    this._hideSubtitle(true);
             });
-            this._signals.push({obj: this._settings, id: colorChangedId});
+            this._signals.push({obj: this._settings, id: subtitleToggleId});
         }
     }
 
     _applySubtitleColor() {
-        if (!this._subtitleOverlay || !this._settings)
+        if (!this._subtitleOverlay)
             return;
 
         // Remove existing color classes
-        let colors = ['cream', 'gold', 'green', 'amber', 'cyan'];
+        let colors = ['cream', 'gold', 'green', 'light_green', 'yellow', 'amber',
+            'rust', 'red', 'light_red', 'blue', 'light_blue', 'cyan', 'light_cyan',
+            'magenta', 'light_magenta', 'white', 'gray'];
         for (let c of colors)
             this._subtitleOverlay.remove_style_class_name(`gnome-speaks-subtitle-${c}`);
 
-        let color = this._settings.get_string('subtitle-color');
-        if (color && color !== 'cream')
+        // Pick color based on current state: user speech vs TTS
+        let color;
+        if (this._state === States.SPEAKING)
+            color = this._getConfigFlag('subtitle_color_tts', 'amber');
+        else
+            color = this._getConfigFlag('subtitle_color_user', 'light_green');
+
+        if (color && color !== 'default')
             this._subtitleOverlay.add_style_class_name(`gnome-speaks-subtitle-${color}`);
     }
 
@@ -838,6 +866,9 @@ export default class GnomeSpeaksExtension extends Extension {
 
         if (!this._subtitleOverlay || !this._subtitleLabel)
             return;
+
+        // Apply per-state color (user speech vs TTS)
+        this._applySubtitleColor();
 
         if (useMarkup) {
             // Pango markup mode — text is pre-formatted with word highlights

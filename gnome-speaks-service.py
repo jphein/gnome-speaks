@@ -494,6 +494,48 @@ def replace_typed_text(old_text, new_text):
             _type_raw(new_suffix)
 
 
+# ── Terminal-mode smart lowercasing ──────────────────────────────────────
+# Lowercase by default but preserve correct casing for filesystem entries.
+# Caches directory listings for 30s to avoid repeated disk I/O.
+
+_fs_case_cache = {}   # {lowercase_name: correct_name}
+_fs_case_time = 0.0
+
+def _refresh_fs_case_cache():
+    """Rebuild the case-correction lookup from common directories."""
+    global _fs_case_cache, _fs_case_time
+    now = time.monotonic()
+    if now - _fs_case_time < 30.0:
+        return
+    _fs_case_time = now
+    cache = {}
+    for d in [os.path.expanduser("~/Projects"), os.path.expanduser("~"),
+              "/etc", "/var", "/tmp"]:
+        try:
+            for name in os.listdir(d):
+                cache[name.lower()] = name
+        except OSError:
+            pass
+    # Also include configured phrase_list entries
+    for phrase in CONFIG.get("phrase_list", []):
+        for word in phrase.split():
+            cache[word.lower()] = word
+    _fs_case_cache = cache
+
+
+def _terminal_lowercase(text):
+    """Lowercase text but preserve casing for known filesystem entries and phrases."""
+    _refresh_fs_case_cache()
+    words = text.split()
+    result = []
+    for w in words:
+        low = w.lower()
+        # Check if this word matches a known filesystem entry or phrase
+        corrected = _fs_case_cache.get(low)
+        result.append(corrected if corrected else low)
+    return " ".join(result)
+
+
 def selection_read():
     """Read the currently highlighted/selected text (PRIMARY selection)."""
     for cmd in [["wl-paste", "--primary", "--no-newline"], ["xclip", "-selection", "primary", "-o"]]:
@@ -1195,10 +1237,13 @@ class GnomeSpeaksService:
                 if mtype == "hypothesis":
                     text = partial_holder[0]
                     if text:
-                        self._throttled_partial_transcription(text)
+                        self._throttled_partial_transcription(
+                            _terminal_lowercase(text) if use_lexical else text)
                         if live_typing:
-                            replace_typed_text(typed_partial[0], raw_partial[0])
-                            typed_partial[0] = raw_partial[0]
+                            # Terminal mode: smart lowercase (preserves filesystem casing)
+                            raw = _terminal_lowercase(raw_partial[0]) if use_lexical else raw_partial[0]
+                            replace_typed_text(typed_partial[0], raw)
+                            typed_partial[0] = raw
                 elif mtype == "phrase":
                     got_phrase = True
                     text = partial_holder[0]
@@ -1264,7 +1309,7 @@ class GnomeSpeaksService:
 
             user_text = _strip_end_word(user_text, end_word)
             if use_lexical and user_text:
-                user_text = user_text.lower()
+                user_text = _terminal_lowercase(user_text)
             _log(f"FINAL: {repr(user_text[:100])}")
 
             # 8. Post-process: voice commands and auto-corrections

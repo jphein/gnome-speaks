@@ -491,7 +491,13 @@ def replace_typed_text(old_text, new_text):
             _send_backspaces(chars_to_delete)
             time.sleep(0.01)
         if new_suffix:
-            _type_raw(new_suffix)
+            # Use clipboard paste for longer corrections (>15 chars) —
+            # ydotool can drop characters in longer bursts.
+            # Short suffixes use direct typing for lower latency.
+            if len(new_suffix) > 15:
+                _clipboard_paste(new_suffix)
+            else:
+                _type_raw(new_suffix)
 
 
 # ── Terminal-mode smart lowercasing ──────────────────────────────────────

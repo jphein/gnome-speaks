@@ -1197,8 +1197,18 @@ class GnomeSpeaksService:
                     if text:
                         self._throttled_partial_transcription(text)
                         if live_typing:
-                            replace_typed_text(typed_partial[0], raw_partial[0])
-                            typed_partial[0] = raw_partial[0]
+                            # Only type complete words — strip the trailing
+                            # incomplete token (no trailing space = still forming).
+                            # This prevents mid-word churn like "hel" → "hello".
+                            raw = raw_partial[0]
+                            if raw and not raw.endswith((' ', '.', ',', '!', '?', '\n')):
+                                last_space = raw.rfind(' ')
+                                stable_raw = raw[:last_space + 1] if last_space >= 0 else ""
+                            else:
+                                stable_raw = raw
+                            if stable_raw:
+                                replace_typed_text(typed_partial[0], stable_raw)
+                                typed_partial[0] = stable_raw
                 elif mtype == "phrase":
                     got_phrase = True
                     text = partial_holder[0]

@@ -396,11 +396,12 @@ def _type_raw(text):
     if _TYPING_TOOL == "ydotool":
         if _YDOTOOL_V1:
             # v1.0+: pipe text via stdin to avoid argument-parsing space issues.
-            # 3ms key delay prevents terminal input buffer drops (especially spaces).
+            # 12ms key delay — sweet spot for reliable terminal input without
+            # feeling sluggish (~83 chars/sec). Lower values drop characters.
             _run_ydotool(
-                ["ydotool", "type", "-d", "3", "--file", "-"],
+                ["ydotool", "type", "-d", "12", "--file", "-"],
                 input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=10,
+                timeout=15,
             )
         else:
             # v0.1.x: --delay for device registration, --key-delay between chars
@@ -1301,6 +1302,10 @@ class GnomeSpeaksService:
                 if CONFIG.get("dictation_mode", True):
                     if live_typing and (is_loop or CONFIG.get("skip_final_paste", False)):
                         if is_loop and typed_partial[0]:
+                            # Final correction: if Azure's final differs from what
+                            # was live-typed, surgically fix the divergent tail.
+                            if typed_partial[0] != user_text:
+                                replace_typed_text(typed_partial[0], user_text)
                             _type_raw(" ")
                     elif live_typing:
                         _send_backspaces(len(typed_partial[0]))

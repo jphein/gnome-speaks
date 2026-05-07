@@ -112,7 +112,9 @@ BUS_NAME = "org.gnome.Speaks"
 OBJECT_PATH = "/org/gnome/Speaks"
 INTERFACE_NAME = "org.gnome.Speaks"
 
-INACTIVITY_TIMEOUT_SEC = 600  # 10 minutes
+INACTIVITY_TIMEOUT_SEC = int(
+    os.environ.get("GNOME_SPEAKS_INACTIVITY_TIMEOUT_SEC", "600")
+)  # 10 minutes default; set to 0 to disable (e.g. when the HTTP API must stay reachable)
 
 MAX_LISTEN_SECONDS = 30
 
@@ -837,6 +839,8 @@ class GnomeSpeaksService:
         if self._inactivity_source_id is not None:
             GLib.source_remove(self._inactivity_source_id)
             self._inactivity_source_id = None
+        if INACTIVITY_TIMEOUT_SEC <= 0:
+            return
         self._inactivity_source_id = GLib.timeout_add_seconds(
             INACTIVITY_TIMEOUT_SEC, self._on_inactivity_timeout,
         )

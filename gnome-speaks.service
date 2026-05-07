@@ -9,14 +9,16 @@ Wants=graphical-session.target
 Type=dbus
 BusName=org.gnome.Speaks
 ExecStart=/home/jp/Projects/gnome-speaks/gnome-speaks-service.py
-# Restart on failure but not on clean exit (inactivity timeout)
-Restart=on-failure
+# Always restart so the HTTP API on :7710 stays reachable; the inactivity
+# timeout is disabled below for the same reason.
+Restart=always
 RestartSec=2
 TimeoutStopSec=10
 # Import session environment for PipeWire, Wayland, and clipboard access
 PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR PULSE_SERVER
 Environment=SPEECH_ENGINE_PATH=%h/Projects/speech-to-cli
 Environment=CLOUD_CHAT_PATH=%h/Projects/cloud-chat-assistant
+Environment=GNOME_SPEAKS_INACTIVITY_TIMEOUT_SEC=0
 
 [Install]
 WantedBy=graphical-session.target

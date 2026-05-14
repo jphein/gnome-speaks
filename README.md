@@ -31,9 +31,9 @@ GNOME Speaks is the desktop integration layer for a four-project voice AI system
 
 | Project | Role | Config file |
 |---------|------|-------------|
-| [speech-to-cli](https://github.com/jphein/speech-to-cli) | Audio engine — STT, TTS, VAD, recorder, WebSocket | `~/.config/speech-to-cli/config.json` |
-| [cloud-chat-assistant](https://github.com/jphein/cloud-chat-assistant) | Multi-cloud LLM provider — Azure AI, Bedrock, Google | `~/.config/cloud-chat-assistant/config.json` |
-| [the-oracle](https://github.com/jphein/the-oracle) | Web frontend — proxies both MCP servers through FastMCP | Reads both config files above |
+| [speech-to-cli](https://github.com/techempower-org/speech-to-cli) | Audio engine — STT, TTS, VAD, recorder, WebSocket | `~/.config/speech-to-cli/config.json` |
+| [cloud-chat-assistant](https://github.com/techempower-org/cloud-chat-assistant) | Multi-cloud LLM provider — Azure AI, Bedrock, Google | `~/.config/cloud-chat-assistant/config.json` |
+| [the-oracle](https://github.com/techempower-org/the-oracle) | Web frontend — proxies both MCP servers through FastMCP | Reads both config files above |
 | **gnome-speaks** (this project) | GNOME Shell integration — badge, panel, keybindings, modes | Both config files + GSettings |
 
 GNOME Speaks preferences can configure all four projects from one unified settings panel.
@@ -161,7 +161,7 @@ The service auto-detects whether `ydotoold` is running and adjusts accordingly.
 ### Quick install
 
 ```bash
-git clone https://github.com/jphein/gnome-speaks.git
+git clone https://github.com/techempower-org/gnome-speaks.git
 cd gnome-speaks
 ./install.sh
 ```

@@ -48,7 +48,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SPEECH_ENGINE = os.environ.get("SPEECH_ENGINE_PATH", os.path.expanduser("~/Projects/speech-to-cli"))
 if not os.path.isdir(_SPEECH_ENGINE):
     print(f"Error: speech-to-cli not found at {_SPEECH_ENGINE}", file=sys.stderr)
-    print("Set SPEECH_ENGINE_PATH or clone https://github.com/jphein/speech-to-cli", file=sys.stderr)
+    print("Set SPEECH_ENGINE_PATH or clone https://github.com/techempower-org/speech-to-cli", file=sys.stderr)
     sys.exit(1)
 sys.path.insert(0, _SPEECH_ENGINE)
 

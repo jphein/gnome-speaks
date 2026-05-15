@@ -1449,8 +1449,15 @@ class GnomeSpeaksService:
 
     # -- TTS: Using speech_tts.tts() directly ------------------------------
 
-    def speak(self, text):
-        """Synthesize and play text via speech_tts.tts(). Returns True on success."""
+    def speak(self, text, voice=None):
+        """Synthesize and play text via speech_tts.tts(). Returns True on success.
+
+        Args:
+            text: Text to speak.
+            voice: Optional Azure ShortName (e.g. 'en-US-JennyNeural') for a
+                per-utterance voice override. When None, falls back to the
+                configured fast/HD voice in CONFIG.
+        """
         if not self._audio_detected:
             _refresh_audio_detection()
             self._audio_detected = True
@@ -1469,7 +1476,7 @@ class GnomeSpeaksService:
             self._set_state("speaking")
             self._speak_thread = threading.Thread(
                 target=self._speak_worker,
-                args=(text.strip(),),
+                args=(text.strip(), voice),
                 daemon=True,
             )
             self._speak_thread.start()
@@ -1526,7 +1533,7 @@ class GnomeSpeaksService:
             text, estimated_duration, stop_event = item
             self._run_subtitle_progress(text, estimated_duration, stop_event)
 
-    def _speak_worker(self, text):
+    def _speak_worker(self, text, voice=None):
         """Background thread: TTS using speech_tts.tts()."""
         try:
             state._cancel_event.clear()
@@ -1553,6 +1560,7 @@ class GnomeSpeaksService:
 
             try:
                 result = speech_tts.tts(text, quality=self._voice_quality, progress_token=None,
+                                        voice=voice,
                                         audio_level_cb=self._tts_level_cb,
                                         output_file=getattr(self, '_pending_output_file', None))
                 # Clear one-shot output file after use
@@ -2393,12 +2401,17 @@ class SpeechHTTPHandler(http.server.BaseHTTPRequestHandler):
             original_quality = svc._voice_quality
             svc._voice_quality = body["quality"]
 
+        # Per-utterance voice override (Azure ShortName like en-US-JennyNeural).
+        # Forwarded to speech_tts.tts() which falls back to CONFIG's fast/HD
+        # voice when None. Sanitized downstream in _prepare_tts.
+        voice_override = body.get("voice") or None
+
         # Set output file for save-to-disk (one-shot, cleared after use)
         if body.get("output_file"):
             svc._pending_output_file = body["output_file"]
 
         try:
-            svc.speak(text)
+            svc.speak(text, voice=voice_override)
             self._send_json({"ok": True, "state": "speaking"})
         finally:
             if original_quality is not None:
